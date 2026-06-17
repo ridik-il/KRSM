@@ -1,0 +1,22 @@
+# Binaries
+/bin/
+/dist/
+/krsm
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+coverage.txt
+coverage.html
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local env
+*.local
+.env
