@@ -319,7 +319,7 @@ func loadScenario(t *testing.T, dir string) scenario {
 	return scenario{
 		name:     filepath.Base(dir),
 		state:    NewScanState(parseCluster(t, read("cluster.yaml"))),
-		action:   parseAction(t, read("action.yaml")),
+		action:   parseAction(t, read("request.yaml")),
 		scope:    parseScope(t, read("scope.yaml")),
 		expected: exp,
 	}

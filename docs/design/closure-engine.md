@@ -121,7 +121,7 @@ type Decision struct {
 
 ## Test strategy — golden scenarios
 
-`closure/testdata/scenarios/<NN-name>/` each holds `cluster.yaml`, `action.yaml`,
+`closure/testdata/scenarios/<NN-name>/` each holds `cluster.yaml`, `request.yaml`,
 `scope.yaml`, `expected.yaml` (carrying `verdict`, `closure`, `escaping`, `external` in
 human `GVK/ns/name` form). A table-driven test walks the directory, loads each scenario
 (via `sigs.k8s.io/yaml`, synthesising deterministic UIDs and resolving ownerReferences to
