@@ -1,0 +1,8 @@
+# The agent, told to relieve memory pressure on one Pod, "restarts the app"
+# by deleting the whole Deployment. Syntactically a single, valid request.
+verb: delete
+cascade: true
+target:
+  kind: Deployment
+  namespace: prod
+  name: web
