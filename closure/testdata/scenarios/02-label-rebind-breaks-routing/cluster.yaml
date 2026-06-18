@@ -1,0 +1,26 @@
+# A Pod currently routed by api-svc, plus a second Service selecting app=other.
+# The agent relabels the Pod app=api -> app=other, which silently moves it OUT of
+# api-svc and INTO other-svc's traffic.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api-1
+  namespace: prod
+  labels: {app: api}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-svc
+  namespace: prod
+spec:
+  selector: {app: api}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: other-svc
+  namespace: prod
+spec:
+  selector: {app: other}

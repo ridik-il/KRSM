@@ -20,6 +20,10 @@ type State interface {
 	// SelectorsTargeting returns Service/PDB/NetworkPolicy whose selector
 	// matches the given pod.
 	SelectorsTargeting(pod Ref) []Ref
+	// SelectorsMatchingLabels returns Service/PDB/NetworkPolicy in ns whose
+	// selector binds the given label set. It lets callers evaluate a candidate
+	// label set (e.g. the old/new labels of a mutation) directly.
+	SelectorsMatchingLabels(ns string, labels map[string]string) []Ref
 	// Consumers returns objects referencing target via volume/env/envFrom.
 	Consumers(target Ref) []Ref
 	// ControllersTargeting returns controllers (e.g. HPA via scaleTargetRef)
@@ -119,13 +123,17 @@ func (s *scanState) SelectorsTargeting(pod Ref) []Ref {
 	if !ok {
 		return nil
 	}
+	return s.SelectorsMatchingLabels(pod.Namespace, p.Labels)
+}
+
+func (s *scanState) SelectorsMatchingLabels(ns string, labels map[string]string) []Ref {
 	var out []Ref
 	for i := range s.objs {
 		o := &s.objs[i]
-		if !selectorKinds[o.Ref.GVK.Kind] || o.Ref.Namespace != pod.Namespace {
+		if !selectorKinds[o.Ref.GVK.Kind] || o.Ref.Namespace != ns {
 			continue
 		}
-		if selectorBinds(o.Ref.GVK.Kind, o.Selector, p.Labels) {
+		if selectorBinds(o.Ref.GVK.Kind, o.Selector, labels) {
 			out = append(out, o.Ref)
 		}
 	}

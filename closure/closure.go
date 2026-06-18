@@ -56,9 +56,17 @@ func Closure(s State, a Action) []Ref {
 			queue = append(queue, s.Consumers(cur)...)
 		}
 
-		// 6. a selector/label mutation unions the old and new match-sets.
+		// 6. a selector mutation unions the old and new selector match-sets (the
+		//    pods the target binds before and after).
 		if classes.has(MutateSelector) && cur.key() == a.Target.key() {
 			queue = append(queue, selectorMutationAffected(s, a)...)
+		}
+
+		// 6b. a label mutation changes which selector-owners bind the target, so
+		//     their endpoint sets gain/lose it (corpus #2: relabel silently breaks
+		//     Service routing). Union the owners binding the old and new labels.
+		if classes.has(MutateLabels) && cur.key() == a.Target.key() {
+			queue = append(queue, labelMutationAffected(s, a)...)
 		}
 
 		// 7. any binding object (Service/PDB/NetworkPolicy) selecting an
@@ -90,6 +98,29 @@ func selectorMutationAffected(s State, a Action) []Ref {
 	}
 	if a.New != nil {
 		add(a.New.Selector)
+	}
+	res := make([]Ref, 0, len(out))
+	for _, r := range out {
+		res = append(res, r)
+	}
+	return res
+}
+
+// labelMutationAffected returns the selector-owners (Service/NetworkPolicy/PDB)
+// whose binding to the target changes when the target's labels change: those
+// binding the old labels (binding lost) or the new labels (binding gained).
+func labelMutationAffected(s State, a Action) []Ref {
+	out := map[string]Ref{}
+	add := func(labels map[string]string) {
+		for _, sel := range s.SelectorsMatchingLabels(a.Target.Namespace, labels) {
+			out[sel.key()] = sel
+		}
+	}
+	if a.Old != nil {
+		add(a.Old.Labels)
+	}
+	if a.New != nil {
+		add(a.New.Labels)
 	}
 	res := make([]Ref, 0, len(out))
 	for _, r := range out {

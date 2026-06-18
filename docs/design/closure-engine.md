@@ -68,7 +68,8 @@ action can be several classes — deleting a Namespace is both *cascade* and
 | `CascadeDelete` | `delete` + `Cascade` | ownerReferences (owner→child, by uid) |
 | `Containment` | `delete` of a Namespace | namespace→all contained objects |
 | `Disruptive` | `delete`/`scale`/`restart` on a workload | workload→selected Pods |
-| `MutateSelector` | `update`/`patch` changing labels/selector | old∪new selector match-set |
+| `MutateSelector` | `update`/`patch` changing the target's **selector** | pods bound by old∪new selector |
+| `MutateLabels` | `update`/`patch` changing the target's **labels** | selector-owners (Service/NP/PDB) binding old∪new labels |
 | `MutateConfig` | `update`/`patch`/**`delete`** of ConfigMap/Secret/PVC | referenced-object→consumers (reverse cross-ref) |
 | `Scale` | `scale` on a workload | scaleTargetRef/HPA + PDB controllers |
 | `FinalizerRemoval` | `update`/`patch` removing finalizers | finalizer→external (WARN, cross-boundary) |

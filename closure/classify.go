@@ -23,7 +23,8 @@ const (
 	CascadeDelete EffectClass = iota
 	Containment
 	Disruptive
-	MutateSelector
+	MutateSelector // the target's own selector changed → pods it binds (old∪new)
+	MutateLabels   // the target's labels changed → selector-owners binding it (old∪new)
 	MutateConfig
 	ScaleEffect
 	FinalizerRemoval
@@ -69,8 +70,11 @@ func classify(a Action) effectSet {
 		if mountableKinds[kind] {
 			s[MutateConfig] = true
 		}
-		if selectorChanged(a) || labelsChanged(a) {
+		if selectorChanged(a) {
 			s[MutateSelector] = true
+		}
+		if labelsChanged(a) {
+			s[MutateLabels] = true
 		}
 		if finalizersRemoved(a) {
 			s[FinalizerRemoval] = true

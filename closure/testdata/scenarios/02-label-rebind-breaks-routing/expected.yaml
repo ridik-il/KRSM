@@ -1,0 +1,13 @@
+# Proves the fix for finding S5: the NEW labels pull the Pod into other-svc's
+# selector (a binding *gained*). The pre-existing pod-visit rule only sees the
+# live (old) labels, so without the label-mutation path other-svc would be missed
+# and, being out of scope, the action would be wrongly admitted.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Pod, namespace: prod, name: api-1}
+  - {kind: Service, namespace: prod, name: api-svc}
+  - {kind: Service, namespace: prod, name: other-svc}
+escaping:
+  - {kind: Service, namespace: prod, name: other-svc}
+external: []
