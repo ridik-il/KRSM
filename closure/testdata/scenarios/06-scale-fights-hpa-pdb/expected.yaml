@@ -1,0 +1,15 @@
+# Corpus #6: the closure includes the HPA (scaleTargetRef→web) and the PDB
+# (guards web's Pods). Both are outside the static task scope — the action will
+# flap rather than complete.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: HorizontalPodAutoscaler, namespace: prod, name: web-hpa}
+  - {kind: PodDisruptionBudget, namespace: prod, name: web-pdb}
+escaping:
+  - {kind: HorizontalPodAutoscaler, namespace: prod, name: web-hpa}
+  - {kind: PodDisruptionBudget, namespace: prod, name: web-pdb}
+external: []

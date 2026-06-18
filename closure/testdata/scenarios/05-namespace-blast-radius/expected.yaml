@@ -1,0 +1,15 @@
+# Corpus #5: deleting the Namespace pulls in everything it contains; none of it is
+# in the staging-scoped task.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Namespace, namespace: "", name: prod}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: Service, namespace: prod, name: web-svc}
+escaping:
+  - {kind: Namespace, namespace: "", name: prod}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: Service, namespace: prod, name: web-svc}
+external: []

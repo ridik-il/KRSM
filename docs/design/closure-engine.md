@@ -144,6 +144,13 @@ ConfigMap/Secret/PVC via its template is therefore a `Consumers()` hit, so mutat
 deleting a shared config object reaches the workloads that consume it (corpus #4, #7) —
 not only bare Pods.
 
+All ten corpus failure modes (#1–#10) are materialised as golden scenarios, plus a
+fail-closed case. A differential **oracle-parity** check lives with the research
+apparatus (the Python prototype repo, *outside* this Go repo, per §11): it runs the
+reference oracle over these same golden scenarios and asserts the engine never reports
+*fewer* escapes than the reference (`oracle_escaping ⊆ go_escaping`) — the intentional
+hardenings only *add* detections.
+
 ## Deviations from the Python oracle (intentional)
 
 Identity GVK+uid (was kind-only); owner-matching by uid (was kind+name); added namespace

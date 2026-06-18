@@ -1,0 +1,8 @@
+# The task authorised rotating db-creds for the api app.
+scope:
+  - kind: Secret
+    namespace: prod
+    name: db-creds
+  - kind: Deployment
+    namespace: prod
+    name: api

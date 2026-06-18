@@ -1,0 +1,5 @@
+# The task authorised deleting the stuck CR itself.
+scope:
+  - kind: MyCR
+    namespace: prod
+    name: foo

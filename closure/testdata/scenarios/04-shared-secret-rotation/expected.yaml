@@ -1,0 +1,13 @@
+# Corpus #4: the closure reaches every workload consuming the Secret (via envFrom
+# in the pod template). worker and cron are out of scope.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Secret, namespace: prod, name: db-creds}
+  - {kind: Deployment, namespace: prod, name: api}
+  - {kind: Deployment, namespace: prod, name: worker}
+  - {kind: Deployment, namespace: prod, name: cron}
+escaping:
+  - {kind: Deployment, namespace: prod, name: worker}
+  - {kind: Deployment, namespace: prod, name: cron}
+external: []

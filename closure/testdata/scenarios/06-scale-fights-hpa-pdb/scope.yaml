@@ -1,0 +1,8 @@
+# The task authorised scaling web and (expectedly) affecting its own Pods.
+scope:
+  - kind: Deployment
+    namespace: prod
+    name: web
+  - kind: Pod
+    namespace: prod
+    name: "web-*"

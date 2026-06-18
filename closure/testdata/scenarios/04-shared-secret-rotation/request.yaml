@@ -1,0 +1,6 @@
+# Rotate (patch) the shared Secret.
+verb: patch
+target:
+  kind: Secret
+  namespace: prod
+  name: db-creds

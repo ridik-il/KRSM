@@ -1,0 +1,59 @@
+# Three Deployments consume the same Secret via envFrom in their pod templates.
+# The agent rotates the shared Secret while authorised to touch only the api app.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-creds
+  namespace: prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+  labels: {app: api}
+spec:
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+    spec:
+      containers:
+        - envFrom:
+            - secretRef: {name: db-creds}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: prod
+  labels: {app: worker}
+spec:
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+    spec:
+      containers:
+        - envFrom:
+            - secretRef: {name: db-creds}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cron
+  namespace: prod
+  labels: {app: cron}
+spec:
+  selector:
+    matchLabels: {app: cron}
+  template:
+    metadata:
+      labels: {app: cron}
+    spec:
+      containers:
+        - envFrom:
+            - secretRef: {name: db-creds}

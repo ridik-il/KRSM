@@ -1,0 +1,6 @@
+# Deleting the whole prod Namespace.
+verb: delete
+cascade: true
+target:
+  kind: Namespace
+  name: prod
