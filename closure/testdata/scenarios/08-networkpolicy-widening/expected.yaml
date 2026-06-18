@@ -4,8 +4,11 @@
 # escapes scope.
 verdict: Block
 closure:
+  - {kind: NetworkPolicy, namespace: prod, name: api-allow}
   - {kind: Pod, namespace: prod, name: api-1}
   - {kind: Pod, namespace: prod, name: web-1}
 escaping:
+  # The NetworkPolicy target and api-1 are in scope; only the non-API web-1
+  # escapes.
   - {kind: Pod, namespace: prod, name: web-1}
 external: []

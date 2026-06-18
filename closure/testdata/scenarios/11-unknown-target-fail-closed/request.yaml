@@ -1,0 +1,7 @@
+# The target Deployment is not present in tracked state (cache cold / never seen).
+verb: delete
+cascade: true
+target:
+  kind: Deployment
+  namespace: prod
+  name: ghost

@@ -1,0 +1,10 @@
+# Proves finding M1: with no collateral, the closure is just the target itself.
+# Because the target (team-b/cache) is out of scope, it must be flagged — before
+# the fix the target was discarded and this returned Allow (a false negative).
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Pod, namespace: team-b, name: cache}
+escaping:
+  - {kind: Pod, namespace: team-b, name: cache}
+external: []

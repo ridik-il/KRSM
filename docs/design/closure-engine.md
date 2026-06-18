@@ -97,8 +97,10 @@ by `UID`; same-name objects in different namespaces/tenants never collide (corpu
 
 BFS worklist from `a.Target`, following only relations the effect-class set licenses;
 visited-set guard ⇒ each resource expanded once ⇒ finite (`|C| ≤ |R|`) and terminating
-even on cyclic ownerReferences (DESIGN §4). The target itself is discarded from the
-result (it is the action's subject, not collateral). Result is sorted for determinism.
+even on cyclic ownerReferences (DESIGN §4). The target is **included** in the result: the
+action affects it directly, so conformance must check the target's own scope membership —
+an action whose target is itself out of scope is a violation even with no collateral
+(corpus #3, #10). Result is sorted for determinism.
 
 ## Verdict — `Safe(s State, a Action, scope []ScopeRef) Decision`
 
@@ -107,8 +109,9 @@ type ScopeRef struct{ GVK GVK; Namespace, Name string }   // v0.1 flat identity;
 type Verdict int                                           // Allow < Warn < Block
 type Decision struct {
     Verdict  Verdict
-    Closure  []Ref
-    Escaping []Ref     // in-cluster closure members not covered by any scope pattern → Block
+    Reason   string    // distinguishes the two deny kinds: scope escape vs fail-closed
+    Closure  []Ref     // includes the action's target
+    Escaping []Ref     // closure members not covered by any scope pattern → Block
     External []Ref     // cross-boundary effects (finalizer→external) → Warn, NOT counted as escaping
 }
 ```
@@ -118,6 +121,10 @@ type Decision struct {
 - **Precedence Block > Warn > Allow.** Any in-cluster escape ⇒ Block. Else any external
   effect ⇒ Warn. Else Allow. (Corpus #9: the orphaned external resource is reported in
   `External`/`Warn`, excluded from `Escaping`.)
+- **Fail-closed (DESIGN §5).** If `a.Target` cannot be resolved in the supplied state the
+  closure is unknown, so `Safe` denies (Block) with a `Reason` distinct from a scope
+  escape — never admits an unbounded blast radius. The closure decision procedure's default
+  on uncertainty is *deny*, not allow.
 
 ## Test strategy — golden scenarios
 

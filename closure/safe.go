@@ -9,7 +9,19 @@ import (
 // stays within the authorised scope. An in-cluster closure member not covered by
 // any scope clause is an escape (→ Block). A cross-boundary effect with no
 // escape is a Warn. Otherwise Allow. Precedence is Block > Warn > Allow.
+//
+// It fails closed: if the action's target cannot be resolved in the supplied
+// state the closure is unknown, so the action is denied rather than admitted
+// with an unbounded blast radius (DESIGN §5). This deny is reported with a
+// Reason distinct from a scope escape.
 func Safe(s State, a Action, scope []ScopeRef) Decision {
+	if _, ok := s.Get(a.Target); !ok {
+		return Decision{
+			Verdict: Block,
+			Reason:  "fail-closed: action target not found in tracked state; closure cannot be computed",
+		}
+	}
+
 	c := Closure(s, a)
 	external := ExternalEffects(s, a)
 
@@ -22,15 +34,19 @@ func Safe(s State, a Action, scope []ScopeRef) Decision {
 	sort.Slice(escaping, func(i, j int) bool { return escaping[i].human() < escaping[j].human() })
 
 	verdict := Allow
+	reason := ""
 	switch {
 	case len(escaping) > 0:
 		verdict = Block
+		reason = "affected-resource closure escapes task scope"
 	case len(external) > 0:
 		verdict = Warn
+		reason = "closure crosses the cluster boundary (external effect)"
 	}
 
 	return Decision{
 		Verdict:  verdict,
+		Reason:   reason,
 		Closure:  c,
 		Escaping: escaping,
 		External: external,

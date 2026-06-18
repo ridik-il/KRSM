@@ -136,10 +136,14 @@ func (v Verdict) String() string {
 	}
 }
 
-// Decision is the result of Safe: the full closure, the in-cluster members that
-// escaped scope (→ Block), and any cross-boundary effects (→ Warn).
+// Decision is the result of Safe: the full closure (including the action's
+// target), the in-cluster members that escaped scope (→ Block), and any
+// cross-boundary effects (→ Warn). Reason distinguishes the two kinds of deny
+// (DESIGN §5): a scope escape versus a fail-closed deny when the closure cannot
+// be computed.
 type Decision struct {
 	Verdict  Verdict
+	Reason   string
 	Closure  []Ref
 	Escaping []Ref
 	External []Ref

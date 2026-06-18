@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,6 +28,9 @@ func TestScenarios(t *testing.T) {
 
 			if got.Verdict.String() != sc.expected.Verdict {
 				t.Errorf("verdict = %s, want %s", got.Verdict, sc.expected.Verdict)
+			}
+			if sc.expected.Reason != "" && !strings.Contains(got.Reason, sc.expected.Reason) {
+				t.Errorf("reason = %q, want it to contain %q", got.Reason, sc.expected.Reason)
 			}
 			assertSet(t, "closure", got.Closure, sc.expected.Closure)
 			assertSet(t, "escaping", got.Escaping, sc.expected.Escaping)

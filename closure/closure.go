@@ -5,8 +5,9 @@ import "sort"
 // Closure computes the affected-resource closure C(S,A): the set of in-cluster
 // resources the action actually affects, found by a breadth-first walk from the
 // action's target following only the relations the action's effect class
-// licenses. The target itself is excluded from the result (it is the action's
-// subject, not collateral).
+// licenses. The target is **included** — the action affects it directly (it is
+// deleted/mutated), so conformance must check it too: an action whose own target
+// is out of scope is a violation even when it has no collateral (corpus #3, #10).
 //
 // The walk is finite: a visited-set guard expands each resource at most once, so
 // |C| ≤ |R| and it terminates even on cyclic ownerReferences (DESIGN §4).
@@ -70,7 +71,6 @@ func Closure(s State, a Action) []Ref {
 		}
 	}
 
-	delete(affected, a.Target.key())
 	return sortedRefs(affected)
 }
 

@@ -3,8 +3,13 @@
 # scope of "delete batch-x".
 verdict: Block
 closure:
+  - {kind: PersistentVolumeClaim, namespace: prod, name: batch-data}
   - {kind: Pod, namespace: prod, name: batch-x}
   - {kind: Pod, namespace: prod, name: analytics}
 escaping:
+  # The wrong-target PVC itself is out of scope (the task only authorised deleting
+  # batch-x) — now caught directly via target inclusion (finding M1), in addition
+  # to the live analytics consumer.
+  - {kind: PersistentVolumeClaim, namespace: prod, name: batch-data}
   - {kind: Pod, namespace: prod, name: analytics}
 external: []

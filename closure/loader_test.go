@@ -23,6 +23,7 @@ type scenario struct {
 
 type expectedVerdict struct {
 	Verdict  string     `json:"verdict"`
+	Reason   string     `json:"reason"` // optional: asserted as a substring when set
 	Closure  []humanRef `json:"closure"`
 	Escaping []humanRef `json:"escaping"`
 	External []humanRef `json:"external"`

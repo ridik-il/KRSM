@@ -1,0 +1,6 @@
+# Scope is irrelevant here: the closure cannot be computed, so the verdict is a
+# fail-closed deny regardless of scope.
+scope:
+  - kind: Pod
+    namespace: prod
+    name: bystander

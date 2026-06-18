@@ -1,0 +1,8 @@
+# Proves finding M3: an unresolvable target yields a fail-closed Block (not Allow,
+# which is what an empty closure would otherwise produce). The deny reason is
+# distinct from a scope escape.
+verdict: Block
+reason: "fail-closed"
+closure: []
+escaping: []
+external: []
