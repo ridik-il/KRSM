@@ -62,13 +62,12 @@ type rawMetadata struct {
 	} `json:"ownerReferences"`
 }
 
-type rawSpec struct {
-	Selector       json.RawMessage `json:"selector"`    // Service: map; workload/PDB: {matchLabels}
-	PodSelector    json.RawMessage `json:"podSelector"` // NetworkPolicy: {matchLabels}
-	ScaleTargetRef *struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	} `json:"scaleTargetRef"`
+// rawPodSpec is the subset of a pod spec the cross-reference relation reads. It
+// appears both at the top level (bare Pods) and under spec.template.spec
+// (workload pod templates) — the latter is where real workloads actually declare
+// their ConfigMap/Secret/PVC consumption (finding M2). Parsing only the top level
+// would make every workload's mounts invisible.
+type rawPodSpec struct {
 	Volumes []struct {
 		ConfigMap *struct {
 			Name string `json:"name"`
@@ -100,6 +99,19 @@ type rawSpec struct {
 			} `json:"valueFrom"`
 		} `json:"env"`
 	} `json:"containers"`
+}
+
+type rawSpec struct {
+	Selector       json.RawMessage `json:"selector"`    // Service: map; workload/PDB: {matchLabels}
+	PodSelector    json.RawMessage `json:"podSelector"` // NetworkPolicy: {matchLabels}
+	ScaleTargetRef *struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	} `json:"scaleTargetRef"`
+	rawPodSpec // bare-Pod top-level volumes/containers (promoted: spec.volumes, spec.containers)
+	Template   *struct {
+		Spec rawPodSpec `json:"spec"`
+	} `json:"template"` // workload pod template: spec.template.spec.{volumes,containers}
 }
 
 func gvkOf(apiVersion, kind string) GVK {
@@ -161,8 +173,22 @@ func matchLabels(raw json.RawMessage) map[string]string {
 }
 
 func crossRefsFrom(ns string, spec rawSpec) []CrossRef {
+	// Cross-refs come from the bare-Pod spec AND the workload pod template — a
+	// Deployment/StatefulSet mounts its config under spec.template.spec (M2).
+	out := podSpecCrossRefs(ns, spec.rawPodSpec)
+	if spec.Template != nil {
+		out = append(out, podSpecCrossRefs(ns, spec.Template.Spec)...)
+	}
+	if spec.ScaleTargetRef != nil {
+		k, n := spec.ScaleTargetRef.Kind, spec.ScaleTargetRef.Name
+		out = append(out, CrossRef{RefScaleTarget, Ref{GVK: GVK{Kind: k}, Namespace: ns, Name: n, UID: uidOf(k, ns, n)}})
+	}
+	return out
+}
+
+func podSpecCrossRefs(ns string, ps rawPodSpec) []CrossRef {
 	var out []CrossRef
-	for _, v := range spec.Volumes {
+	for _, v := range ps.Volumes {
 		switch {
 		case v.ConfigMap != nil:
 			out = append(out, CrossRef{RefVolume, Ref{GVK: GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: v.ConfigMap.Name, UID: uidOf("ConfigMap", ns, v.ConfigMap.Name)}})
@@ -172,7 +198,7 @@ func crossRefsFrom(ns string, spec rawSpec) []CrossRef {
 			out = append(out, CrossRef{RefVolume, Ref{GVK: GVK{Version: "v1", Kind: "PersistentVolumeClaim"}, Namespace: ns, Name: v.PVC.ClaimName, UID: uidOf("PersistentVolumeClaim", ns, v.PVC.ClaimName)}})
 		}
 	}
-	for _, c := range spec.Containers {
+	for _, c := range ps.Containers {
 		for _, e := range c.EnvFrom {
 			if e.ConfigMapRef != nil {
 				out = append(out, CrossRef{RefEnvFrom, Ref{GVK: GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: e.ConfigMapRef.Name, UID: uidOf("ConfigMap", ns, e.ConfigMapRef.Name)}})
@@ -192,10 +218,6 @@ func crossRefsFrom(ns string, spec rawSpec) []CrossRef {
 				out = append(out, CrossRef{RefEnv, Ref{GVK: GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: r.Name, UID: uidOf("Secret", ns, r.Name)}})
 			}
 		}
-	}
-	if spec.ScaleTargetRef != nil {
-		k, n := spec.ScaleTargetRef.Kind, spec.ScaleTargetRef.Name
-		out = append(out, CrossRef{RefScaleTarget, Ref{GVK: GVK{Kind: k}, Namespace: ns, Name: n, UID: uidOf(k, ns, n)}})
 	}
 	return out
 }

@@ -1,0 +1,5 @@
+# The task authorised changes to the web app only.
+scope:
+  - kind: Deployment
+    namespace: prod
+    name: web

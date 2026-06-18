@@ -132,9 +132,16 @@ type Decision struct {
 `scope.yaml`, `expected.yaml` (carrying `verdict`, `closure`, `escaping`, `external` in
 human `GVK/ns/name` form). A table-driven test walks the directory, loads each scenario
 (via `sigs.k8s.io/yaml`, synthesising deterministic UIDs and resolving ownerReferences to
-uids on load), runs `Safe`, and asserts closure+escaping+external+verdict. Adding a
-scenario = adding a directory. Property tests assert `|C| ≤ |R|` and termination on a
-cyclic-ownerReference fixture. Scenario 1 is the acceptance tracer bullet.
+uids on load), runs `Safe`, and asserts closure+escaping+external+verdict (and the deny
+`reason` as a substring when a scenario specifies one). Adding a scenario = adding a
+directory. Property tests assert `|C| ≤ |R|` and termination on a cyclic-ownerReference
+fixture. Scenario 1 is the acceptance tracer bullet.
+
+**Cross-references are read from both the bare-Pod spec and the workload pod template**
+(`spec.template.spec.{volumes,containers}`). A Deployment/StatefulSet that mounts a
+ConfigMap/Secret/PVC via its template is therefore a `Consumers()` hit, so mutating or
+deleting a shared config object reaches the workloads that consume it (corpus #4, #7) —
+not only bare Pods.
 
 ## Deviations from the Python oracle (intentional)
 

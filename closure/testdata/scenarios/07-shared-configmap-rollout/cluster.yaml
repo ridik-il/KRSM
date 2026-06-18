@@ -1,0 +1,41 @@
+# Two Deployments mount the same ConfigMap via their POD TEMPLATES (spec.template.
+# spec.volumes) — the realistic case. The agent patches the shared ConfigMap while
+# authorised to touch only the web app.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-config
+  namespace: prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      volumes:
+        - configMap: {name: shared-config}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+  labels: {app: api}
+spec:
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+    spec:
+      volumes:
+        - configMap: {name: shared-config}

@@ -1,0 +1,6 @@
+# The agent patches the shared ConfigMap (wrong object / over-broad edit).
+verb: patch
+target:
+  kind: ConfigMap
+  namespace: prod
+  name: shared-config
