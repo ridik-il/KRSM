@@ -1,0 +1,8 @@
+# Deleting the PVC. A single valid request — but its closure reaches every Pod
+# that mounts the claim, including a workload outside the task.
+verb: delete
+cascade: true
+target:
+  kind: PersistentVolumeClaim
+  namespace: prod
+  name: batch-data

@@ -1,0 +1,10 @@
+# Proves the fix for finding #1: deleting a mountable follows its consumers.
+# The closure reaches the still-running analytics Pod, which escapes the task
+# scope of "delete batch-x".
+verdict: Block
+closure:
+  - {kind: Pod, namespace: prod, name: batch-x}
+  - {kind: Pod, namespace: prod, name: analytics}
+escaping:
+  - {kind: Pod, namespace: prod, name: analytics}
+external: []

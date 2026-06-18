@@ -1,0 +1,5 @@
+# The task authorised deleting the stale Pod only.
+scope:
+  - kind: Pod
+    namespace: prod
+    name: batch-x

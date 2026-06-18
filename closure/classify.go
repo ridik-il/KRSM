@@ -49,6 +49,13 @@ func classify(a Action) effectSet {
 		if workloadKinds[kind] {
 			s[Disruptive] = true
 		}
+		// Deleting a ConfigMap/Secret/PVC affects every workload that consumes
+		// it (broken mount/env on restart; data loss for a bound PVC), exactly
+		// as a mutation does. The reference oracle treats delete as mutating;
+		// omitting it here is a false negative for a safety gate.
+		if mountableKinds[kind] {
+			s[MutateConfig] = true
+		}
 	case Scale:
 		if workloadKinds[kind] {
 			s[Disruptive] = true

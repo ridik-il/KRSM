@@ -69,7 +69,7 @@ action can be several classes — deleting a Namespace is both *cascade* and
 | `Containment` | `delete` of a Namespace | namespace→all contained objects |
 | `Disruptive` | `delete`/`scale`/`restart` on a workload | workload→selected Pods |
 | `MutateSelector` | `update`/`patch` changing labels/selector | old∪new selector match-set |
-| `MutateConfig` | `update`/`patch` of ConfigMap/Secret/PVC | referenced-object→consumers (reverse cross-ref) |
+| `MutateConfig` | `update`/`patch`/**`delete`** of ConfigMap/Secret/PVC | referenced-object→consumers (reverse cross-ref) |
 | `Scale` | `scale` on a workload | scaleTargetRef/HPA + PDB controllers |
 | `FinalizerRemoval` | `update`/`patch` removing finalizers | finalizer→external (WARN, cross-boundary) |
 
@@ -135,3 +135,30 @@ Identity GVK+uid (was kind-only); owner-matching by uid (was kind+name); added n
 containment, envFrom/env.valueFrom, finalizer→external (WARN), scaleTargetRef/HPA+PDB, and
 selector-mutation old∪new — all per the plan. The oracle remains the parity reference for
 the relations it does implement.
+
+## Known v0.1 limitations (deliberate, tracked)
+
+These are scoped out of v0.1 on purpose; they are written down so golden scenarios are
+authored honestly rather than fudged.
+
+- **Scope is flat identity only (the expressiveness gap).** `scope(T)` is a list of
+  `ScopeRef` (GVK + namespace + glob name); there is no ownership/selector/reference
+  scope *dimension* until the `TaskContract` compiler (v0.3). So scenarios whose
+  intended scope is "a workload **and its own pods**" cannot be stated as one clause:
+  e.g. corpus **#6** (scale `web`, where the workload's own pods are the intended effect)
+  and **#8** (the API pods the policy is meant to govern) must enumerate those pods with
+  a name glob (`api-*`) to express in-scope membership. The closure is exact; only the
+  *scope language* is limited. Inexpressible scopes will, in v0.3, emit an explicit gap
+  signal rather than silently over-grant.
+- **Single-target `Action`.** An action has one `Target`. Multi-target requests —
+  corpus **#3**'s "delete the Pod *and* the PVC" or **#5**'s `delete pods --all` — are
+  modelled as the single most-dangerous action (e.g. the PVC delete). PV identity and
+  `reclaimPolicy` (the disk behind a PVC) are **not** modelled in v0.1; closure stops at
+  the in-cluster consumers of the PVC.
+- **Identity is `(Kind, namespace, name)` in v0.1.** All state is synthetic fixtures with
+  no real `uid`s, so the loader synthesises a deterministic uid from `Kind/namespace/name`
+  and `Ref.human()` is the canonical identity/display key. This means two resources that
+  share kind+namespace+name across different API **groups** would collide — harmless for
+  the corpus, but full GVK-group/real-uid identity is deferred to the live-state slice
+  (v0.4), where the API server supplies authoritative `uid`s and `ownerReferences` carry
+  `apiVersion`+`uid`.

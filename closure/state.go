@@ -12,6 +12,11 @@ type State interface {
 	NamespaceContents(ns string) []Ref
 	// PodsSelectedBy returns pods matching the selector of r (same namespace).
 	PodsSelectedBy(r Ref) []Ref
+	// PodsMatching returns pods in ns bound by the given selector, with
+	// ownerKind determining empty-selector semantics. It lets callers evaluate
+	// a candidate selector (e.g. the old/new selector of a mutation) without
+	// reconstructing state — keeping closure free of any concrete State type.
+	PodsMatching(ns string, selector map[string]string, ownerKind string) []Ref
 	// SelectorsTargeting returns Service/PDB/NetworkPolicy whose selector
 	// matches the given pod.
 	SelectorsTargeting(pod Ref) []Ref
@@ -92,13 +97,17 @@ func (s *scanState) NamespaceContents(ns string) []Ref {
 
 func (s *scanState) PodsSelectedBy(r Ref) []Ref {
 	owner, ok := s.lookup(r)
-	if !ok || len(owner.Selector) == 0 {
+	if !ok {
 		return nil
 	}
+	return s.PodsMatching(owner.Ref.Namespace, owner.Selector, owner.Ref.GVK.Kind)
+}
+
+func (s *scanState) PodsMatching(ns string, selector map[string]string, ownerKind string) []Ref {
 	var out []Ref
 	for i := range s.objs {
 		o := &s.objs[i]
-		if o.Ref.GVK.Kind == "Pod" && o.Ref.Namespace == r.Namespace && selectorMatches(owner.Selector, o.Labels) {
+		if o.Ref.GVK.Kind == "Pod" && o.Ref.Namespace == ns && selectorBinds(ownerKind, selector, o.Labels) {
 			out = append(out, o.Ref)
 		}
 	}
@@ -116,9 +125,7 @@ func (s *scanState) SelectorsTargeting(pod Ref) []Ref {
 		if !selectorKinds[o.Ref.GVK.Kind] || o.Ref.Namespace != pod.Namespace {
 			continue
 		}
-		// An empty selector on a binding object matches every pod in the
-		// namespace (corpus #8, degenerate NetworkPolicy podSelector: {}).
-		if o.Selector != nil && selectorMatches(o.Selector, p.Labels) {
+		if selectorBinds(o.Ref.GVK.Kind, o.Selector, p.Labels) {
 			out = append(out, o.Ref)
 		}
 	}
@@ -166,9 +173,24 @@ func (s *scanState) ControllersTargeting(r Ref) []Ref {
 	return out
 }
 
-// selectorMatches reports whether every key/value in sel is present in labels.
-// An empty selector matches everything (Kubernetes semantics).
-func selectorMatches(sel, labels map[string]string) bool {
+// selectorBinds reports whether a selector owned by ownerKind binds a pod with
+// the given labels. Empty-selector semantics are kind-aware: an empty (or nil)
+// Service selector binds nothing (a selector-less Service has no endpoints),
+// while an empty NetworkPolicy/PodDisruptionBudget/workload selector binds every
+// pod in the namespace (corpus #8, the degenerate `podSelector: {}`). A nil
+// selector binds nothing for any kind.
+func selectorBinds(ownerKind string, selector, labels map[string]string) bool {
+	if selector == nil {
+		return false
+	}
+	if len(selector) == 0 {
+		return ownerKind != "Service"
+	}
+	return subsetOf(selector, labels)
+}
+
+// subsetOf reports whether every key/value in sel is present in labels.
+func subsetOf(sel, labels map[string]string) bool {
 	for k, v := range sel {
 		if labels[k] != v {
 			return false

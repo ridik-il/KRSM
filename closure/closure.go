@@ -75,16 +75,13 @@ func Closure(s State, a Action) []Ref {
 }
 
 // selectorMutationAffected returns the union of pods matched by the old and new
-// selectors of a mutated workload/Service, plus the bindings on those pods.
+// selectors of a mutated workload/Service/NetworkPolicy. Their bindings are
+// reached when each pod is later visited. It asks the State directly via
+// PodsMatching, so it works for any State implementation (no concrete type).
 func selectorMutationAffected(s State, a Action) []Ref {
 	out := map[string]Ref{}
 	add := func(sel map[string]string) {
-		if sel == nil {
-			return
-		}
-		probe := Object{Ref: a.Target, Selector: sel}
-		tmp := NewScanState(append(snapshot(s, a.Target), probe))
-		for _, p := range tmp.PodsSelectedBy(a.Target) {
+		for _, p := range s.PodsMatching(a.Target.Namespace, sel, a.Target.GVK.Kind) {
 			out[p.key()] = p
 		}
 	}
@@ -99,23 +96,6 @@ func selectorMutationAffected(s State, a Action) []Ref {
 		res = append(res, r)
 	}
 	return res
-}
-
-// snapshot returns all objects in the state except the target, so a probe object
-// carrying the candidate selector can stand in for it.
-func snapshot(s State, target Ref) []Object {
-	ss, ok := s.(*scanState)
-	if !ok {
-		return nil
-	}
-	out := make([]Object, 0, len(ss.objs))
-	for i := range ss.objs {
-		if ss.objs[i].Ref.key() == target.key() {
-			continue
-		}
-		out = append(out, ss.objs[i])
-	}
-	return out
 }
 
 // ExternalEffects returns cross-boundary effects an action triggers that cannot

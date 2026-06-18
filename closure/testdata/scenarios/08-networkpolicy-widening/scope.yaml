@@ -1,0 +1,11 @@
+# The task: manage ingress for the API. v0.1 scope is flat identity, so the
+# intended "API Pods" are expressed with a name glob (see the v0.1 expressiveness
+# gap in docs/design/closure-engine.md). The richer selector-dimension scope
+# arrives with TaskContract in v0.3.
+scope:
+  - kind: NetworkPolicy
+    namespace: prod
+    name: api-allow
+  - kind: Pod
+    namespace: prod
+    name: "api-*"
