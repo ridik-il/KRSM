@@ -1,4 +1,11 @@
-package closure
+// Package scenario loads a KRSM golden scenario — cluster.yaml, request.yaml and
+// scope.yaml — into the closure types so it can be checked by closure.Safe.
+//
+// It is a dev/demo concern, not part of the embeddable SDK: it is the only place
+// (outside tests) that depends on sigs.k8s.io/yaml, keeping the public closure
+// package stdlib-only. Both the krsm CLI and the closure golden tests use it, so
+// there is a single loader rather than two copies.
+package scenario
 
 import (
 	"encoding/json"
@@ -7,37 +14,63 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"testing"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/ridik-il/krsm/closure"
 )
 
-// scenario is a loaded golden test case.
-type scenario struct {
-	name     string
-	state    State
-	action   Action
-	scope    []ScopeRef
-	expected expectedVerdict
+// Scenario is a runnable check input: the three things closure.Safe needs.
+type Scenario struct {
+	State  closure.State
+	Action closure.Action
+	Scope  []closure.ScopeRef
 }
 
-type expectedVerdict struct {
-	Verdict  string     `json:"verdict"`
-	Reason   string     `json:"reason"` // optional: asserted as a substring when set
-	Closure  []humanRef `json:"closure"`
-	Escaping []humanRef `json:"escaping"`
-	External []humanRef `json:"external"`
-}
+// Load reads cluster.yaml, request.yaml and scope.yaml from dir and builds a
+// Scenario. It deliberately does not read expected.yaml — that is a test-only
+// assertion artifact. It returns an error if a file is missing or malformed.
+func Load(dir string) (*Scenario, error) {
+	read := func(f string) ([]byte, error) {
+		b, err := os.ReadFile(filepath.Join(dir, f))
+		if err != nil {
+			return nil, err
+		}
+		return b, nil
+	}
 
-// humanRef is the Kind/namespace/name identity used in golden files (uid-free).
-type humanRef struct {
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-}
+	clusterRaw, err := read("cluster.yaml")
+	if err != nil {
+		return nil, err
+	}
+	objs, err := parseCluster(clusterRaw)
+	if err != nil {
+		return nil, err
+	}
 
-func (h humanRef) key() string {
-	return fmt.Sprintf("%s/%s/%s", h.Kind, h.Namespace, h.Name)
+	requestRaw, err := read("request.yaml")
+	if err != nil {
+		return nil, err
+	}
+	action, err := parseAction(requestRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	scopeRaw, err := read("scope.yaml")
+	if err != nil {
+		return nil, err
+	}
+	scope, err := parseScope(scopeRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Scenario{
+		State:  closure.NewScanState(objs),
+		Action: action,
+		Scope:  scope,
+	}, nil
 }
 
 // --- raw manifest parsing ---------------------------------------------------
@@ -65,8 +98,8 @@ type rawMetadata struct {
 // rawPodSpec is the subset of a pod spec the cross-reference relation reads. It
 // appears both at the top level (bare Pods) and under spec.template.spec
 // (workload pod templates) — the latter is where real workloads actually declare
-// their ConfigMap/Secret/PVC consumption (finding M2). Parsing only the top level
-// would make every workload's mounts invisible.
+// their ConfigMap/Secret/PVC consumption. Parsing only the top level would make
+// every workload's mounts invisible.
 type rawPodSpec struct {
 	Volumes []struct {
 		ConfigMap *struct {
@@ -114,8 +147,8 @@ type rawSpec struct {
 	} `json:"template"` // workload pod template: spec.template.spec.{volumes,containers}
 }
 
-func gvkOf(apiVersion, kind string) GVK {
-	g := GVK{Kind: kind}
+func gvkOf(apiVersion, kind string) closure.GVK {
+	g := closure.GVK{Kind: kind}
 	if parts := strings.SplitN(apiVersion, "/", 2); len(parts) == 2 {
 		g.Group, g.Version = parts[0], parts[1]
 	} else {
@@ -172,39 +205,39 @@ func matchLabels(raw json.RawMessage) map[string]string {
 	return wrap.MatchLabels
 }
 
-func crossRefsFrom(ns string, spec rawSpec) []CrossRef {
+func crossRefsFrom(ns string, spec rawSpec) []closure.CrossRef {
 	// Cross-refs come from the bare-Pod spec AND the workload pod template — a
-	// Deployment/StatefulSet mounts its config under spec.template.spec (M2).
+	// Deployment/StatefulSet mounts its config under spec.template.spec.
 	out := podSpecCrossRefs(ns, spec.rawPodSpec)
 	if spec.Template != nil {
 		out = append(out, podSpecCrossRefs(ns, spec.Template.Spec)...)
 	}
 	if spec.ScaleTargetRef != nil {
 		k, n := spec.ScaleTargetRef.Kind, spec.ScaleTargetRef.Name
-		out = append(out, CrossRef{RefScaleTarget, Ref{GVK: GVK{Kind: k}, Namespace: ns, Name: n, UID: uidOf(k, ns, n)}})
+		out = append(out, closure.CrossRef{Kind: closure.RefScaleTarget, Ref: closure.Ref{GVK: closure.GVK{Kind: k}, Namespace: ns, Name: n, UID: uidOf(k, ns, n)}})
 	}
 	return out
 }
 
-func podSpecCrossRefs(ns string, ps rawPodSpec) []CrossRef {
-	var out []CrossRef
+func podSpecCrossRefs(ns string, ps rawPodSpec) []closure.CrossRef {
+	var out []closure.CrossRef
 	for _, v := range ps.Volumes {
 		switch {
 		case v.ConfigMap != nil:
-			out = append(out, CrossRef{RefVolume, Ref{GVK: GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: v.ConfigMap.Name, UID: uidOf("ConfigMap", ns, v.ConfigMap.Name)}})
+			out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: v.ConfigMap.Name, UID: uidOf("ConfigMap", ns, v.ConfigMap.Name)}})
 		case v.Secret != nil:
-			out = append(out, CrossRef{RefVolume, Ref{GVK: GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: v.Secret.SecretName, UID: uidOf("Secret", ns, v.Secret.SecretName)}})
+			out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: v.Secret.SecretName, UID: uidOf("Secret", ns, v.Secret.SecretName)}})
 		case v.PVC != nil:
-			out = append(out, CrossRef{RefVolume, Ref{GVK: GVK{Version: "v1", Kind: "PersistentVolumeClaim"}, Namespace: ns, Name: v.PVC.ClaimName, UID: uidOf("PersistentVolumeClaim", ns, v.PVC.ClaimName)}})
+			out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "PersistentVolumeClaim"}, Namespace: ns, Name: v.PVC.ClaimName, UID: uidOf("PersistentVolumeClaim", ns, v.PVC.ClaimName)}})
 		}
 	}
 	for _, c := range ps.Containers {
 		for _, e := range c.EnvFrom {
 			if e.ConfigMapRef != nil {
-				out = append(out, CrossRef{RefEnvFrom, Ref{GVK: GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: e.ConfigMapRef.Name, UID: uidOf("ConfigMap", ns, e.ConfigMapRef.Name)}})
+				out = append(out, closure.CrossRef{Kind: closure.RefEnvFrom, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: e.ConfigMapRef.Name, UID: uidOf("ConfigMap", ns, e.ConfigMapRef.Name)}})
 			}
 			if e.SecretRef != nil {
-				out = append(out, CrossRef{RefEnvFrom, Ref{GVK: GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: e.SecretRef.Name, UID: uidOf("Secret", ns, e.SecretRef.Name)}})
+				out = append(out, closure.CrossRef{Kind: closure.RefEnvFrom, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: e.SecretRef.Name, UID: uidOf("Secret", ns, e.SecretRef.Name)}})
 			}
 		}
 		for _, e := range c.Env {
@@ -212,37 +245,36 @@ func podSpecCrossRefs(ns string, ps rawPodSpec) []CrossRef {
 				continue
 			}
 			if r := e.ValueFrom.ConfigMapKeyRef; r != nil {
-				out = append(out, CrossRef{RefEnv, Ref{GVK: GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: r.Name, UID: uidOf("ConfigMap", ns, r.Name)}})
+				out = append(out, closure.CrossRef{Kind: closure.RefEnv, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: r.Name, UID: uidOf("ConfigMap", ns, r.Name)}})
 			}
 			if r := e.ValueFrom.SecretKeyRef; r != nil {
-				out = append(out, CrossRef{RefEnv, Ref{GVK: GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: r.Name, UID: uidOf("Secret", ns, r.Name)}})
+				out = append(out, closure.CrossRef{Kind: closure.RefEnv, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: r.Name, UID: uidOf("Secret", ns, r.Name)}})
 			}
 		}
 	}
 	return out
 }
 
-func parseCluster(t *testing.T, raw []byte) []Object {
-	t.Helper()
-	var objs []Object
+func parseCluster(raw []byte) ([]closure.Object, error) {
+	var objs []closure.Object
 	for _, doc := range docSep.Split(string(raw), -1) {
 		if strings.TrimSpace(stripComments(doc)) == "" {
 			continue
 		}
 		var m rawManifest
 		if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
-			t.Fatalf("parse manifest: %v\n%s", err, doc)
+			return nil, fmt.Errorf("parse manifest: %w\n%s", err, doc)
 		}
 		if m.Kind == "" {
 			continue
 		}
 		ns := nsOf(m.Kind, m.Metadata.Namespace)
-		ref := Ref{GVK: gvkOf(m.APIVersion, m.Kind), Namespace: ns, Name: m.Metadata.Name, UID: uidOf(m.Kind, ns, m.Metadata.Name)}
-		owners := make([]OwnerRef, 0, len(m.Metadata.OwnerReferences))
+		ref := closure.Ref{GVK: gvkOf(m.APIVersion, m.Kind), Namespace: ns, Name: m.Metadata.Name, UID: uidOf(m.Kind, ns, m.Metadata.Name)}
+		owners := make([]closure.OwnerRef, 0, len(m.Metadata.OwnerReferences))
 		for _, o := range m.Metadata.OwnerReferences {
-			owners = append(owners, OwnerRef{Kind: o.Kind, Name: o.Name, UID: uidOf(o.Kind, ns, o.Name)})
+			owners = append(owners, closure.OwnerRef{Kind: o.Kind, Name: o.Name, UID: uidOf(o.Kind, ns, o.Name)})
 		}
-		objs = append(objs, Object{
+		objs = append(objs, closure.Object{
 			Ref:        ref,
 			Labels:     m.Metadata.Labels,
 			Selector:   selectorFrom(m.Kind, m.Spec),
@@ -251,7 +283,7 @@ func parseCluster(t *testing.T, raw []byte) []Object {
 			Finalizers: m.Metadata.Finalizers,
 		})
 	}
-	return objs
+	return objs, nil
 }
 
 func stripComments(doc string) string {
@@ -266,7 +298,7 @@ func stripComments(doc string) string {
 	return b.String()
 }
 
-// --- action / scope / expected ---------------------------------------------
+// --- action / scope ---------------------------------------------------------
 
 type rawRef struct {
 	Group     string `json:"group"`
@@ -290,60 +322,36 @@ type rawAction struct {
 	New     *rawPayload `json:"new"`
 }
 
-func parseAction(t *testing.T, raw []byte) Action {
-	t.Helper()
+func parseAction(raw []byte) (closure.Action, error) {
 	var ra rawAction
 	if err := yaml.Unmarshal(raw, &ra); err != nil {
-		t.Fatalf("parse action: %v", err)
+		return closure.Action{}, fmt.Errorf("parse action: %w", err)
 	}
 	ns := nsOf(ra.Target.Kind, ra.Target.Namespace)
-	a := Action{
-		Verb:    Verb(ra.Verb),
-		Target:  Ref{GVK: GVK{Group: ra.Target.Group, Version: ra.Target.Version, Kind: ra.Target.Kind}, Namespace: ns, Name: ra.Target.Name, UID: uidOf(ra.Target.Kind, ns, ra.Target.Name)},
+	a := closure.Action{
+		Verb:    closure.Verb(ra.Verb),
+		Target:  closure.Ref{GVK: closure.GVK{Group: ra.Target.Group, Version: ra.Target.Version, Kind: ra.Target.Kind}, Namespace: ns, Name: ra.Target.Name, UID: uidOf(ra.Target.Kind, ns, ra.Target.Name)},
 		Cascade: ra.Cascade == nil || *ra.Cascade,
 	}
 	if ra.Old != nil {
-		a.Old = &Object{Labels: ra.Old.Labels, Selector: ra.Old.Selector, Finalizers: ra.Old.Finalizers}
+		a.Old = &closure.Object{Labels: ra.Old.Labels, Selector: ra.Old.Selector, Finalizers: ra.Old.Finalizers}
 	}
 	if ra.New != nil {
-		a.New = &Object{Labels: ra.New.Labels, Selector: ra.New.Selector, Finalizers: ra.New.Finalizers}
+		a.New = &closure.Object{Labels: ra.New.Labels, Selector: ra.New.Selector, Finalizers: ra.New.Finalizers}
 	}
-	return a
+	return a, nil
 }
 
-func parseScope(t *testing.T, raw []byte) []ScopeRef {
-	t.Helper()
+func parseScope(raw []byte) ([]closure.ScopeRef, error) {
 	var rs struct {
 		Scope []rawRef `json:"scope"`
 	}
 	if err := yaml.Unmarshal(raw, &rs); err != nil {
-		t.Fatalf("parse scope: %v", err)
+		return nil, fmt.Errorf("parse scope: %w", err)
 	}
-	out := make([]ScopeRef, 0, len(rs.Scope))
+	out := make([]closure.ScopeRef, 0, len(rs.Scope))
 	for _, r := range rs.Scope {
-		out = append(out, ScopeRef{GVK: GVK{Group: r.Group, Version: r.Version, Kind: r.Kind}, Namespace: nsOf(r.Kind, r.Namespace), Name: r.Name})
+		out = append(out, closure.ScopeRef{GVK: closure.GVK{Group: r.Group, Version: r.Version, Kind: r.Kind}, Namespace: nsOf(r.Kind, r.Namespace), Name: r.Name})
 	}
-	return out
-}
-
-func loadScenario(t *testing.T, dir string) scenario {
-	t.Helper()
-	read := func(f string) []byte {
-		b, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		return b
-	}
-	var exp expectedVerdict
-	if err := yaml.Unmarshal(read("expected.yaml"), &exp); err != nil {
-		t.Fatalf("parse expected: %v", err)
-	}
-	return scenario{
-		name:     filepath.Base(dir),
-		state:    NewScanState(parseCluster(t, read("cluster.yaml"))),
-		action:   parseAction(t, read("request.yaml")),
-		scope:    parseScope(t, read("scope.yaml")),
-		expected: exp,
-	}
+	return out, nil
 }
