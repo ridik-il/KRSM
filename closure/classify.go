@@ -67,6 +67,16 @@ func classify(a Action) effectSet {
 			s[Disruptive] = true
 		}
 	case Update, Patch:
+		// An in-place update of a workload (image/resources/env/template labels)
+		// triggers a rolling recreation of the pods it controls, so its pods are
+		// in the blast radius even when the request payload shows no selector or
+		// label change. The v0.1 action model does not carry the pod template, so
+		// this is a deliberate over-approximation: any Update/Patch of a workload
+		// is treated as disruptive. That is sound for a safety gate (no false
+		// negatives); field-level template diffing is deferred.
+		if workloadKinds[kind] {
+			s[Disruptive] = true
+		}
 		if mountableKinds[kind] {
 			s[MutateConfig] = true
 		}

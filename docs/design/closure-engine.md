@@ -184,3 +184,17 @@ authored honestly rather than fudged.
   the corpus, but full GVK-group/real-uid identity is deferred to the live-state slice
   (v0.4), where the API server supplies authoritative `uid`s and `ownerReferences` carry
   `apiVersion`+`uid`.
+- **Workload mutation is a coarse over-approximation.** Because the v0.1 `Action` does not
+  carry the pod template, any `update`/`patch` of a workload is treated as disruptive —
+  the closure pulls in the pods it selects even when the change was a benign annotation
+  edit that recreates nothing. This is sound for a safety gate (it never *under*-reports
+  the blast radius), at the cost of over-blocking some no-op edits. Field-level template
+  diffing (distinguishing an image bump from an annotation change) is deferred; it needs
+  the template plumbed into `Action`. Guarded by scenario `12-workload-update-recreates-pods`.
+- **A kind-less scope clause matches every kind in the namespace.** `matchScope` skips the
+  kind check when `ScopeRef.GVK.Kind == ""`, so a clause like `{namespace: prod, name: "*"}`
+  authorises *all* kinds in `prod` — convenient for a deliberate namespace-wide grant, but a
+  footgun if the `kind` was omitted by mistake (a too-broad scope silently passes more than
+  intended). v0.1 keeps this permissive and documents it here; the `TaskContract` compiler
+  (v0.3) is the right place to require an explicit kind (or an explicit `kind: "*"`) so an
+  accidental omission is rejected rather than silently widening scope.

@@ -1,0 +1,5 @@
+# The task authorised updating the Deployment itself — but NOT disrupting its pods.
+scope:
+  - kind: Deployment
+    namespace: prod
+    name: web

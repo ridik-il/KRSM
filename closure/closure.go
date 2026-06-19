@@ -5,11 +5,14 @@ import "sort"
 // Closure computes the affected-resource closure C(S,A): the set of in-cluster
 // resources the action actually affects, found by a breadth-first walk from the
 // action's target following only the relations the action's effect class
-// licenses. The target is **included** — the action affects it directly (it is
-// deleted/mutated), so conformance must check it too: an action whose own target
-// is out of scope is a violation even when it has no collateral (corpus #3, #10).
+// licenses. The target is **included when it exists in state** — the action
+// affects it directly (it is deleted/mutated), so conformance must check it too:
+// an action whose own target is out of scope is a violation even when it has no
+// collateral (corpus #3, #10). A target absent from state seeds nothing (it
+// cannot be affected); Safe handles that case as a fail-closed deny.
 //
-// The walk is finite: a visited-set guard expands each resource at most once, so
+// The walk is finite: a visited-set guard expands each resource at most once, and
+// every queued ref comes from a State method (so it names a real object), so
 // |C| ≤ |R| and it terminates even on cyclic ownerReferences (DESIGN §4).
 // Cross-boundary effects (finalizer→external) are reported by ExternalEffects,
 // not here.
@@ -18,7 +21,10 @@ func Closure(s State, a Action) []Ref {
 
 	affected := map[string]Ref{}
 	visited := map[string]bool{}
-	queue := []Ref{a.Target}
+	var queue []Ref
+	if _, ok := s.Get(a.Target); ok {
+		queue = append(queue, a.Target)
+	}
 
 	for len(queue) > 0 {
 		cur := queue[0]

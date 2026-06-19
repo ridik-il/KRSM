@@ -1,0 +1,9 @@
+# An in-place pod-template change (image/resources/env). The v0.1 action model
+# does not carry the pod template, so there is deliberately no old/new selector or
+# label change here: the closure must still reach the recreated pods purely
+# because an Update/Patch of a workload is disruptive.
+verb: update
+target:
+  kind: Deployment
+  namespace: prod
+  name: web
