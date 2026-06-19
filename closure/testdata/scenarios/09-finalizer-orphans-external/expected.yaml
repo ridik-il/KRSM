@@ -1,0 +1,10 @@
+# Corpus #9: the CR itself is in scope, so nothing in-cluster escapes — but the
+# finalizer removal crosses the cluster boundary (the external resource is now
+# orphaned). That is a WARN, with the external effect reported separately.
+verdict: Warn
+reason: "crosses the cluster boundary"
+closure:
+  - {kind: MyCR, namespace: prod, name: foo}
+escaping: []
+external:
+  - {kind: External, namespace: prod, name: "example.com/external-lb"}

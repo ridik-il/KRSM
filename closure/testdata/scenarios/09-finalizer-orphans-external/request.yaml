@@ -1,0 +1,11 @@
+# Force-deleting by stripping the finalizer — which silently orphans the external
+# resource the finalizer protected.
+verb: patch
+target:
+  kind: MyCR
+  namespace: prod
+  name: foo
+old:
+  finalizers: ["example.com/external-lb"]
+new:
+  finalizers: []

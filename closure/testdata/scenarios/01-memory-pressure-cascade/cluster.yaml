@@ -1,0 +1,63 @@
+# Live-state snapshot. Task was authorised only to relieve memory on Pod web-1,
+# but the agent will issue `delete deployment web`. KRSM computes the closure.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-7f9
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - kind: Deployment
+      name: web
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - kind: ReplicaSet
+      name: web-7f9
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-2
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - kind: ReplicaSet
+      name: web-7f9
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-3
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - kind: ReplicaSet
+      name: web-7f9
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc
+  namespace: prod
+spec:
+  selector: {app: web}

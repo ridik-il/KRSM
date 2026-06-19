@@ -1,0 +1,5 @@
+# The task was authorised to touch exactly one Pod.
+scope:
+  - kind: Pod
+    namespace: prod
+    name: web-1

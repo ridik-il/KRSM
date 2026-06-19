@@ -1,0 +1,45 @@
+# Scaling web down collides with an HPA that targets it (scaleTargetRef) and a PDB
+# that guards its Pods. Both controllers are in the closure of a bare scale action.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: prod
+  labels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-2
+  namespace: prod
+  labels: {app: web}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-hpa
+  namespace: prod
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: web
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+  namespace: prod
+spec:
+  selector:
+    matchLabels: {app: web}

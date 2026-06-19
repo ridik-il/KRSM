@@ -1,0 +1,29 @@
+# Task was authorised to update the Deployment `web` only. The agent issues an
+# in-place update of its pod template (e.g. `kubectl set image deploy/web ...`),
+# which triggers a rolling recreation of every `web-*` pod. The pods are outside
+# the task scope, so the rollout's blast radius escapes — exactly the kind of
+# mutation a syntactic check (which sees only "patch Deployment web") misses.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: prod
+  labels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-2
+  namespace: prod
+  labels: {app: web}

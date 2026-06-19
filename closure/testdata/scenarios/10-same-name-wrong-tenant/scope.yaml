@@ -1,0 +1,5 @@
+# The task authorised touching team-a's cache only.
+scope:
+  - kind: Pod
+    namespace: team-a
+    name: cache

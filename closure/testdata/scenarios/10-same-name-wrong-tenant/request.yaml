@@ -1,0 +1,7 @@
+# Namespace slip: the agent targets team-b's identically-named Pod.
+verb: delete
+cascade: true
+target:
+  kind: Pod
+  namespace: team-b
+  name: cache

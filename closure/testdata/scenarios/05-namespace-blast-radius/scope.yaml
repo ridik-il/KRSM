@@ -1,0 +1,5 @@
+# The task authorised clearing failed Pods in the staging namespace only.
+scope:
+  - kind: Pod
+    namespace: staging
+    name: "*"

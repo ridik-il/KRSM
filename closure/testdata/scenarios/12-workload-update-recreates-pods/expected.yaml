@@ -1,0 +1,14 @@
+# H1 regression guard: updating a workload's pod template recreates its pods, so
+# the closure includes web-1/web-2. They are outside the task scope → Block.
+# Without the "Update/Patch of a workload is disruptive" rule the closure collapses
+# to {web} and the action is wrongly Allowed.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+escaping:
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+external: []

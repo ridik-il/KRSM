@@ -1,0 +1,9 @@
+# A stuck custom resource whose finalizer guards an external (cloud) resource.
+---
+apiVersion: example.com/v1
+kind: MyCR
+metadata:
+  name: foo
+  namespace: prod
+  finalizers:
+    - example.com/external-lb

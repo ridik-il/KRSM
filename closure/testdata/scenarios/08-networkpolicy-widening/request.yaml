@@ -1,0 +1,11 @@
+# Widening the podSelector to the empty selector {} — which, for a NetworkPolicy,
+# means "every Pod in the namespace". The old∪new match-set is computed.
+verb: patch
+target:
+  kind: NetworkPolicy
+  namespace: prod
+  name: api-allow
+old:
+  selector: {app: api}
+new:
+  selector: {}

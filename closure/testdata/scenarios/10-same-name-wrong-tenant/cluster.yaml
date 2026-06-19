@@ -1,0 +1,17 @@
+# Two tenants own a same-named Pod. There is deliberately NO collateral
+# (no Service/owner) on team-b's Pod, to isolate finding M1: the action's own
+# target must be scope-checked even when nothing else is affected.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cache
+  namespace: team-a
+  labels: {app: cache}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cache
+  namespace: team-b
+  labels: {app: cache}

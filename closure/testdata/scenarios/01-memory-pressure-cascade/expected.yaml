@@ -1,0 +1,18 @@
+# Expected verdict for 01 — memory-pressure cascade.
+# Closure escapes a single-Pod scope via ownerReference cascade + the web-svc
+# label-selector binding. Matches fixtures/01 expected.md (escaping + BLOCK).
+verdict: Block
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: Pod, namespace: prod, name: web-3}
+  - {kind: ReplicaSet, namespace: prod, name: web-7f9}
+  - {kind: Service, namespace: prod, name: web-svc}
+escaping:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: Pod, namespace: prod, name: web-3}
+  - {kind: ReplicaSet, namespace: prod, name: web-7f9}
+  - {kind: Service, namespace: prod, name: web-svc}
+external: []

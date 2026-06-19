@@ -1,0 +1,10 @@
+# Relabel the Pod. No selector on a Pod — this is a pure label mutation.
+verb: patch
+target:
+  kind: Pod
+  namespace: prod
+  name: api-1
+old:
+  labels: {app: api}
+new:
+  labels: {app: other}

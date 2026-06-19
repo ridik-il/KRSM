@@ -1,0 +1,9 @@
+# State that does NOT contain the action's target. The closure is unknown, so
+# KRSM must fail closed (finding M3) rather than admit an unbounded blast radius.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bystander
+  namespace: prod
+  labels: {app: bystander}

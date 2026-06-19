@@ -1,0 +1,6 @@
+# Scaling the Deployment down.
+verb: scale
+target:
+  kind: Deployment
+  namespace: prod
+  name: web

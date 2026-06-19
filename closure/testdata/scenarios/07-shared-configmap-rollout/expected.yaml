@@ -1,0 +1,13 @@
+# Proves finding M2: the closure reaches BOTH Deployments through their pod
+# templates. Without template parsing, Consumers() would return nothing and the
+# api rollout (and the out-of-scope ConfigMap) would be missed.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: ConfigMap, namespace: prod, name: shared-config}
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: Deployment, namespace: prod, name: api}
+escaping:
+  - {kind: ConfigMap, namespace: prod, name: shared-config}
+  - {kind: Deployment, namespace: prod, name: api}
+external: []
