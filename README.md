@@ -103,7 +103,7 @@ KRSM is also the artifact of an ongoing **Doctor of Engineering Sciences** thesi
 
 Building in vertical slices, each shippable on its own — see **[ROADMAP](docs/ROADMAP.md)**:
 
-1. Faithful closure engine (the four relations) · 2. The 10-scenario test corpus · 3. `TaskContract` scope language · 4. Live-cluster reads · 5. The admission webhook · 6. OSS polish.
+1. Faithful closure engine (the four relations) · 2. The failure-mode test corpus (runnable via `krsm check`) · 3. `TaskContract` scope language · 4. Live-cluster reads · 5. The admission webhook · 6. OSS polish.
 
 ## Contributing & security
 

@@ -1,0 +1,6 @@
+# Cascade-delete the whole Deployment — same action as scenario 01.
+verb: delete
+target:
+  kind: Deployment
+  namespace: prod
+  name: web

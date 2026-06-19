@@ -8,6 +8,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -31,15 +32,28 @@ Usage:
   krsm <command>
 
 Commands:
-  check <dir>   Run the closure check for a scenario directory
-                (cluster.yaml, request.yaml, scope.yaml) and print the verdict
-  version       Print the krsm version
-  help          Show this help
+  check [--plain] <dir>   Run the closure check for a scenario directory
+                          (cluster.yaml, request.yaml, scope.yaml) and print
+                          the verdict. --plain emits ASCII without emoji.
+  version                 Print the krsm version
+  help                    Show this help
 
 Exit codes for check: 0 allow/warn, 2 block, 1 usage or load error.
 
 KRSM is in early development. See docs/ROADMAP.md for the build plan
 and docs/DESIGN.md for the architecture.
+`
+
+const checkUsage = `Usage: krsm check [--plain] <scenario-dir>
+
+Loads cluster.yaml, request.yaml and scope.yaml from <scenario-dir>, computes the
+affected-resource closure, and prints the ACTION / SCOPE / CLOSURE / VERDICT report.
+
+Flags:
+  --plain   ASCII output without emoji (for CI logs / non-UTF8 terminals)
+
+Exit codes: 0 allow/warn, 2 block, 1 usage or load error.
+A WARN's cross-boundary detail is written to stderr.
 `
 
 func main() {
@@ -77,39 +91,72 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// runCheck loads a scenario directory, runs closure.Safe, and writes the report.
+// runCheck parses the check flags, loads the scenario, runs closure.Safe, writes
+// the report, and derives the exit status: a Block verdict becomes errBlocked.
+// Keeping the verdict→status decision here (not in the formatter) separates
+// presentation from control flow.
 func runCheck(args []string, stdout, stderr io.Writer) error {
-	if len(args) < 1 {
-		return fmt.Errorf("check: missing scenario directory (usage: krsm check <dir>)")
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // we render usage and flag errors ourselves
+	plain := fs.Bool("plain", false, "ASCII output without emoji")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, checkUsage)
+			return nil
+		}
+		return fmt.Errorf("check: %w", err)
 	}
-	sc, err := scenario.Load(args[0])
+	if fs.NArg() < 1 {
+		return fmt.Errorf("check: missing scenario directory (usage: krsm check [--plain] <dir>)")
+	}
+
+	sc, err := scenario.Load(fs.Arg(0))
 	if err != nil {
 		return fmt.Errorf("check: %w", err)
 	}
 	dec := closure.Safe(sc.State, sc.Action, sc.Scope)
-	return writeReport(stdout, stderr, sc, dec)
+	writeReport(stdout, stderr, sc, dec, *plain)
+	if dec.Verdict == closure.Block {
+		return errBlocked
+	}
+	return nil
 }
 
-// writeReport prints the ACTION/SCOPE/CLOSURE report (always to stdout) and the
-// verdict, routed by severity: ALLOW and BLOCK to stdout, WARN to stderr. It
-// returns errBlocked on a Block verdict so the caller can set the exit code.
-func writeReport(stdout, stderr io.Writer, sc *scenario.Scenario, dec closure.Decision) error {
+// writeReport renders the report. The factual ACTION/SCOPE/CLOSURE lines and the
+// ALLOW/BLOCK verdict go to stdout; a WARN writes a self-contained verdict stub
+// to stdout and its cross-boundary detail to stderr. It returns nothing — the
+// caller owns the exit-status decision.
+func writeReport(stdout, stderr io.Writer, sc *scenario.Scenario, dec closure.Decision, plain bool) {
 	fmt.Fprintf(stdout, "%-8s %s %s\n", "ACTION", sc.Action.Verb, sc.Action.Target)
 	fmt.Fprintf(stdout, "%-8s %s\n", "SCOPE", joinScope(sc.Scope))
 	fmt.Fprintf(stdout, "%-8s %s\n", "CLOSURE", joinRefs(dec.Closure))
 
 	switch dec.Verdict {
 	case closure.Block:
-		fmt.Fprintf(stdout, "%-8s ❌ BLOCK — %s:\n", "VERDICT", dec.Reason)
+		fmt.Fprintf(stdout, "%-8s %sBLOCK — %s:\n", "VERDICT", icon(closure.Block, plain), dec.Reason)
 		writeDetail(stdout, dec.Escaping)
-		return errBlocked
 	case closure.Warn:
-		fmt.Fprintf(stderr, "%-8s ⚠ WARN — %s:\n", "VERDICT", dec.Reason)
+		fmt.Fprintf(stdout, "%-8s %sWARN — %s (detail on stderr)\n", "VERDICT", icon(closure.Warn, plain), dec.Reason)
+		fmt.Fprintf(stderr, "%-8s %sWARN — %s:\n", "VERDICT", icon(closure.Warn, plain), dec.Reason)
 		writeDetail(stderr, dec.External)
-		return nil
 	default:
-		fmt.Fprintf(stdout, "%-8s ✅ ALLOW — closure within task scope\n", "VERDICT")
-		return nil
+		fmt.Fprintf(stdout, "%-8s %sALLOW — closure within task scope\n", "VERDICT", icon(closure.Allow, plain))
+	}
+}
+
+// icon returns the verdict marker. In plain mode it is empty, so the verdict word
+// stands alone (no width-ambiguous emoji to misalign CI logs / non-UTF8 terminals).
+func icon(v closure.Verdict, plain bool) string {
+	if plain {
+		return ""
+	}
+	switch v {
+	case closure.Block:
+		return "❌ "
+	case closure.Warn:
+		return "⚠ "
+	default:
+		return "✅ "
 	}
 }
 
@@ -130,7 +177,18 @@ func joinRefs(refs []closure.Ref) string {
 func joinScope(scope []closure.ScopeRef) string {
 	parts := make([]string, len(scope))
 	for i, s := range scope {
-		parts[i] = fmt.Sprintf("%s/%s/%s", s.GVK.Kind, s.Namespace, s.Name)
+		parts[i] = scopeStr(s)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// scopeStr renders a scope clause as Kind/namespace/name, qualifying the kind with
+// its API group (Kubernetes "Kind.group" form) when set, so two clauses that
+// differ only by group are unambiguous.
+func scopeStr(s closure.ScopeRef) string {
+	kind := s.GVK.Kind
+	if s.GVK.Group != "" {
+		kind += "." + s.GVK.Group
+	}
+	return fmt.Sprintf("%s/%s/%s", kind, s.Namespace, s.Name)
 }

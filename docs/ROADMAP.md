@@ -18,12 +18,12 @@ The heart of the tool: compute `C(S, A)` correctly over all four relations.
 
 ## v0.2 — The scenario corpus
 
-Turn the 10 failure modes into the project's golden test suite and demo material.
+Turn the failure-mode corpus into the project's golden test suite and demo material.
 
-- Each scenario = `(state, action, scope, expected verdict + escaping set)` YAML under `testdata/`.
+- Each scenario = `(state, action, scope, expected verdict + escaping set)` YAML under `closure/testdata/scenarios/`.
 - A table-driven test asserts each one.
 
-**Done when:** 10 scenarios pass; each doubles as a runnable "static admission misses this, KRSM catches it" demo.
+**Done when:** every scenario in `closure/testdata/scenarios/` passes (13 today — the failure-mode corpus, a fail-closed case, a workload-update case, and an in-scope *allow* case); each doubles as a runnable `krsm check <dir>` "static admission misses this, KRSM catches it" demo.
 
 ## v0.3 — The scope contract
 

@@ -1,0 +1,12 @@
+# The task authorised tearing down the web workload AND its children (the
+# ReplicaSet it owns and its web-* Pods), so the whole cascade is in scope.
+scope:
+  - kind: Deployment
+    namespace: prod
+    name: web
+  - kind: ReplicaSet
+    namespace: prod
+    name: "web-*"
+  - kind: Pod
+    namespace: prod
+    name: "web-*"
