@@ -67,6 +67,19 @@ const (
 	OpDoesNotExist SelectorOperator = "DoesNotExist"
 )
 
+// Valid reports whether o is one of the four recognised set-based operators. A
+// loader parsing an untrusted selector should reject an operator that is not
+// Valid rather than let it fall through to matches (which treats an unknown
+// operator as "matches nothing" — the unsafe direction for a binding object).
+func (o SelectorOperator) Valid() bool {
+	switch o {
+	case OpIn, OpNotIn, OpExists, OpDoesNotExist:
+		return true
+	default:
+		return false
+	}
+}
+
 // SelectorRequirement is one matchExpressions clause: a key, an operator, and
 // (for In/NotIn) a value set. Exists/DoesNotExist ignore Values.
 type SelectorRequirement struct {

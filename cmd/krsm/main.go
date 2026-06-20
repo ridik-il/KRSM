@@ -109,6 +109,12 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() < 1 {
 		return fmt.Errorf("check: missing scenario directory (usage: krsm check [--plain] <dir>)")
 	}
+	// Go's flag package stops at the first positional, so a flag placed after the
+	// dir (e.g. `check <dir> --plain`) would be silently dropped. Reject any extra
+	// positional rather than run with a misread invocation.
+	if fs.NArg() > 1 {
+		return fmt.Errorf("check: unexpected argument %q; flags must precede <dir> (usage: krsm check [--plain] <dir>)", fs.Arg(1))
+	}
 
 	sc, err := scenario.Load(fs.Arg(0))
 	if err != nil {

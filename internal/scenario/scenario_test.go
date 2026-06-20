@@ -27,6 +27,41 @@ func TestLoadBuildsCheckableInputs(t *testing.T) {
 	}
 }
 
+// TestParseClusterRejectsUnknownOperator: a selector with an operator outside the
+// four set-based operators must be rejected, not silently parsed into a selector
+// that binds nothing. Silently binding nothing would drop a real
+// NetworkPolicy/workload binding from the closure — a missed escape, the failure
+// direction a safety gate must never take. Fail closed (error → exit 1) instead.
+func TestParseClusterRejectsUnknownOperator(t *testing.T) {
+	bad := "apiVersion: networking.k8s.io/v1\n" +
+		"kind: NetworkPolicy\n" +
+		"metadata: {name: np, namespace: prod}\n" +
+		"spec:\n" +
+		"  podSelector:\n" +
+		"    matchExpressions:\n" +
+		"      - {key: tier, operator: Exist}\n"
+	if _, err := parseCluster([]byte(bad)); err == nil {
+		t.Fatal("parseCluster(unknown operator) = nil error, want rejection")
+	}
+}
+
+// TestClusterScopedKindsExcludesNamespaced is a safety invariant guard: a
+// namespaced kind must never appear in clusterScopedKinds. If one did, nsOf would
+// resolve it to namespace "", excluding it from its namespace's containment — so a
+// Namespace delete would silently miss it (a false negative). Over-inclusion of a
+// cluster-scoped kind is merely conservative; this direction is unsafe.
+func TestClusterScopedKindsExcludesNamespaced(t *testing.T) {
+	for _, kind := range []string{
+		"Pod", "ConfigMap", "Secret", "Service", "Deployment", "ReplicaSet",
+		"StatefulSet", "DaemonSet", "PersistentVolumeClaim", "NetworkPolicy",
+		"PodDisruptionBudget", "Role", "RoleBinding", "Endpoints",
+	} {
+		if clusterScopedKinds[kind] {
+			t.Errorf("%q is namespaced but is listed as cluster-scoped — unsafe (would escape namespace containment)", kind)
+		}
+	}
+}
+
 // TestLoadErrors covers the failure contract: a missing directory and malformed
 // cluster YAML both surface as errors rather than a half-built Scenario.
 func TestLoadErrors(t *testing.T) {

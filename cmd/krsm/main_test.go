@@ -168,6 +168,20 @@ func TestCheckBadFlag(t *testing.T) {
 	}
 }
 
+// TestCheckExtraArgIsUsageError: a stray positional argument after <dir> is a
+// usage error (exit 1), not a silently-ignored token. Guards against a flag placed
+// after the dir (e.g. `check <dir> --plain`) being dropped without warning.
+func TestCheckExtraArgIsUsageError(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", scenarioDir("01-memory-pressure-cascade"), "extra"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("run(check dir extra) = nil error, want a usage error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Error("extra-arg error must not be errBlocked (exit 1, not 2)")
+	}
+}
+
 // TestScopeStrIncludesGroup: a scope clause with an API group renders as
 // Kind.group so clauses differing only by group are unambiguous; core stays bare.
 func TestScopeStrIncludesGroup(t *testing.T) {

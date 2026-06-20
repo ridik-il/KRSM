@@ -1,0 +1,5 @@
+# The task authorised deleting the ConfigMap — NOT disrupting the debug-target Pod.
+scope:
+  - kind: ConfigMap
+    namespace: prod
+    name: dbg-config

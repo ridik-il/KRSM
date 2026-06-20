@@ -2,6 +2,23 @@ package closure
 
 import "testing"
 
+// TestSelectorOperatorValid pins which operator strings are accepted. An operator
+// the loader cannot recognise must be rejected upstream rather than silently
+// evaluating to "matches nothing" — for a NetworkPolicy/workload selector that
+// would drop a real binding from the closure (a missed escape).
+func TestSelectorOperatorValid(t *testing.T) {
+	for _, op := range []SelectorOperator{OpIn, OpNotIn, OpExists, OpDoesNotExist} {
+		if !op.Valid() {
+			t.Errorf("%q should be valid", op)
+		}
+	}
+	for _, op := range []SelectorOperator{"", "in", "Exist", "Notin", "Equals", "DoesNotExists"} {
+		if op.Valid() {
+			t.Errorf("%q should be invalid", op)
+		}
+	}
+}
+
 // TestLabelSelectorMatches pins the four-operator semantics, especially the
 // absence-sensitive NotIn/DoesNotExist (they match a MISSING key) — the trap a
 // key-iterating implementation silently gets wrong.

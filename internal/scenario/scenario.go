@@ -144,10 +144,11 @@ type rawContainer struct {
 }
 
 type rawPodSpec struct {
-	Volumes          []rawVolume    `json:"volumes"`
-	Containers       []rawContainer `json:"containers"`
-	InitContainers   []rawContainer `json:"initContainers"`
-	ImagePullSecrets []struct {
+	Volumes             []rawVolume    `json:"volumes"`
+	Containers          []rawContainer `json:"containers"`
+	InitContainers      []rawContainer `json:"initContainers"`
+	EphemeralContainers []rawContainer `json:"ephemeralContainers"`
+	ImagePullSecrets    []struct {
 		Name string `json:"name"`
 	} `json:"imagePullSecrets"`
 }
@@ -180,6 +181,14 @@ func gvkOf(apiVersion, kind string) closure.GVK {
 // so it is never counted as the contents of a namespace and matches scope clauses
 // on "". Custom cluster-scoped CRDs need live discovery and are deferred to v0.4;
 // YAML cannot distinguish an absent namespace from an explicit empty one.
+//
+// SAFETY INVARIANT: only add a kind here if it is *definitely* cluster-scoped. A
+// namespaced kind listed here would resolve to namespace "" and so escape its
+// namespace's containment — a Namespace delete would silently miss it (a false
+// negative, the one error class a safety gate must not have). Over-inclusion of a
+// genuinely cluster-scoped kind is merely conservative; under-scoping is unsafe.
+// This static map stands in for API-discovery/RESTMapper scope until v0.4 reads it
+// live. Guarded by TestClusterScopedKindsExcludesNamespaced.
 var clusterScopedKinds = map[string]bool{
 	"Namespace":                      true,
 	"Node":                           true,
@@ -214,15 +223,17 @@ func uidOf(kind, ns, name string) string {
 // map, NetworkPolicy uses spec.podSelector.matchLabels, others use
 // spec.selector.matchLabels. A present-but-empty selector is a non-nil empty map
 // (matches all); an absent selector is nil.
-func selectorFrom(kind string, spec rawSpec) closure.LabelSelector {
+func selectorFrom(kind string, spec rawSpec) (closure.LabelSelector, error) {
 	switch kind {
 	case "Service":
 		if spec.Selector == nil {
-			return closure.LabelSelector{} // absent → binds nothing
+			return closure.LabelSelector{}, nil // absent → binds nothing
 		}
 		m := map[string]string{}
-		_ = json.Unmarshal(spec.Selector, &m)
-		return closure.LabelSelector{MatchLabels: m}
+		if err := json.Unmarshal(spec.Selector, &m); err != nil {
+			return closure.LabelSelector{}, fmt.Errorf("parse Service selector: %w", err)
+		}
+		return closure.LabelSelector{MatchLabels: m}, nil
 	case "NetworkPolicy":
 		return matchLabels(spec.PodSelector)
 	default:
@@ -235,9 +246,9 @@ func selectorFrom(kind string, spec rawSpec) closure.LabelSelector {
 // neither field yields a non-nil empty map (present-empty → kind decides).
 // matchExpressions are captured so set-based requirements (In/NotIn/Exists/
 // DoesNotExist) bind precisely rather than collapsing to the empty selector.
-func matchLabels(raw json.RawMessage) closure.LabelSelector {
+func matchLabels(raw json.RawMessage) (closure.LabelSelector, error) {
 	if raw == nil {
-		return closure.LabelSelector{}
+		return closure.LabelSelector{}, nil
 	}
 	var wrap struct {
 		MatchLabels      map[string]string `json:"matchLabels"`
@@ -247,19 +258,29 @@ func matchLabels(raw json.RawMessage) closure.LabelSelector {
 			Values   []string `json:"values"`
 		} `json:"matchExpressions"`
 	}
-	_ = json.Unmarshal(raw, &wrap)
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return closure.LabelSelector{}, fmt.Errorf("parse selector: %w", err)
+	}
 	sel := closure.LabelSelector{MatchLabels: wrap.MatchLabels}
 	for _, e := range wrap.MatchExpressions {
+		op := closure.SelectorOperator(e.Operator)
+		// Reject an unrecognised operator instead of letting it fall through to
+		// matches (which would treat it as "matches nothing"): for a binding
+		// object that silently drops a real binding from the closure — a missed
+		// escape. Fail closed at the parse boundary.
+		if !op.Valid() {
+			return closure.LabelSelector{}, fmt.Errorf("invalid selector operator %q for key %q (want In, NotIn, Exists or DoesNotExist)", e.Operator, e.Key)
+		}
 		sel.MatchExpressions = append(sel.MatchExpressions, closure.SelectorRequirement{
 			Key:      e.Key,
-			Operator: closure.SelectorOperator(e.Operator),
+			Operator: op,
 			Values:   e.Values,
 		})
 	}
 	if wrap.MatchLabels == nil && len(sel.MatchExpressions) == 0 {
 		sel.MatchLabels = map[string]string{} // present but empty → matches all
 	}
-	return sel
+	return sel, nil
 }
 
 func crossRefsFrom(ns string, spec rawSpec) []closure.CrossRef {
@@ -297,9 +318,10 @@ func podSpecCrossRefs(ns string, ps rawPodSpec) []closure.CrossRef {
 			}
 		}
 	}
-	// initContainers consume ConfigMaps/Secrets exactly as regular containers do
-	// (a broken mount/env fails the pod on its next start), so walk both.
-	containers := append(append([]rawContainer{}, ps.Containers...), ps.InitContainers...)
+	// initContainers and ephemeralContainers consume ConfigMaps/Secrets exactly as
+	// regular containers do (a broken mount/env fails the container on its next
+	// start), so walk all three.
+	containers := append(append(append([]rawContainer{}, ps.Containers...), ps.InitContainers...), ps.EphemeralContainers...)
 	for _, c := range containers {
 		for _, e := range c.EnvFrom {
 			if e.ConfigMapRef != nil {
@@ -346,10 +368,14 @@ func parseCluster(raw []byte) ([]closure.Object, error) {
 		for _, o := range m.Metadata.OwnerReferences {
 			owners = append(owners, closure.OwnerRef{Kind: o.Kind, Name: o.Name, UID: uidOf(o.Kind, ns, o.Name)})
 		}
+		sel, err := selectorFrom(m.Kind, m.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s: %w", m.Kind, m.Metadata.Name, err)
+		}
 		objs = append(objs, closure.Object{
 			Ref:        ref,
 			Labels:     m.Metadata.Labels,
-			Selector:   selectorFrom(m.Kind, m.Spec),
+			Selector:   sel,
 			Owners:     owners,
 			CrossRefs:  crossRefsFrom(ns, m.Spec),
 			Finalizers: m.Metadata.Finalizers,

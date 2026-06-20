@@ -56,5 +56,10 @@ kind, not of the selector value. `Object.Selector` retypes from `map[string]stri
 - **Backward-compatible for existing data.** A matchLabels-only selector reduces `Matches` to the old
   subset test; the nil-vs-present-empty distinction is preserved, so the 13 golden scenarios are
   unchanged.
-- **Follow-on:** the `TaskContract` scope clause (DESIGN §6) should gain `matchExpressions` for
-  selector/scope symmetry — tracked separately, not part of this decision.
+- **Follow-on (now the next correctness-relevant step, v0.3 — see ROADMAP):** this ADR makes the
+  *closure* side bind `matchExpressions` precisely, but the *scope* side (`TaskContract`, DESIGN §6)
+  still cannot, so a precise closure is tested against an imprecise scope and can be wrongly **Block**ed.
+  The `selector` scope clause must gain `matchExpressions` **and** become state-dependent (evaluating a
+  selector clause needs the candidate resource's labels — `State` access — whereas `matchScope` today
+  sees only a `Ref`). Selector precision on only one side of `C ⊆ scope(T)` is half a fix; closing the
+  asymmetry leads v0.3 rather than being deferred indefinitely.
