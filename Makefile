@@ -32,8 +32,20 @@ vet: ## Run go vet
 lint: ## Run golangci-lint (must be installed)
 	golangci-lint run
 
+.PHONY: staticcheck
+staticcheck: ## Run staticcheck (must be installed)
+	staticcheck $(PKG)
+
 .PHONY: check
-check: fmt vet test ## Format, vet, and test — the pre-commit gate
+check: fmt vet lint staticcheck test ## The full local gate — mirrors CI (fmt, vet, lint, staticcheck, race tests)
+
+.PHONY: snapshot
+snapshot: ## Build a local release snapshot into dist/ (no publish/sign; needs goreleaser)
+	goreleaser release --snapshot --clean
+
+.PHONY: release-check
+release-check: ## Validate .goreleaser.yaml without building (needs goreleaser)
+	goreleaser check
 
 .PHONY: clean
 clean: ## Remove build artifacts

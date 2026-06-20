@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Release automation (ADR-0006): `.goreleaser.yaml` + `.github/workflows/release.yml` —
+  a tag (`v*`) builds multi-OS/arch `krsm` binaries with SHA-256 checksums, release notes
+  extracted from this changelog, a syft SBOM per archive, and keyless cosign signing.
+- CI / supply-chain hardening: `staticcheck` now runs in CI (previously local-only),
+  plus `govulncheck`, CodeQL (Go), PR dependency-review, and a weekly OpenSSF Scorecard
+  scan (with README badges) and coverage reporting. All actions are pinned to commit SHAs,
+  `go-version-file: go.mod` is the single Go-version source, and jobs use least-privilege
+  permissions + concurrency cancellation.
+- Repo hygiene: Dependabot (gomod + github-actions), `CODEOWNERS`, and a pull-request template.
+
+### Changed
+- `make check` now mirrors CI (adds `lint` + `staticcheck`); CONTRIBUTING updated to match.
+
 ## [0.2.0] - 2026-06-20
 
 ### Added

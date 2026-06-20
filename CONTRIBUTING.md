@@ -14,10 +14,12 @@ Thanks for your interest. KRSM is an early, design-led project — the [design](
 make build     # build the binary
 make test      # go test -race
 make lint      # golangci-lint (install: https://golangci-lint.run)
-make check     # fmt + vet + test — run before you push
+make check     # fmt + vet + lint + staticcheck + race tests — mirrors CI; run before you push
 ```
 
-Toolchain: Go 1.24+, `gofmt -s`, `golangci-lint`, `staticcheck`. CI runs all of these on every PR; they must pass.
+Toolchain: Go per `go.mod` (the CI source of truth), `gofmt -s`, `golangci-lint`, `staticcheck`.
+`make check` mirrors the PR gate; CI additionally runs `govulncheck`, CodeQL, dependency review, and
+(weekly) an OpenSSF Scorecard scan. All required checks must pass before merge to `main`.
 
 ## Pull requests
 

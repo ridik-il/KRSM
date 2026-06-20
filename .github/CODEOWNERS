@@ -1,0 +1,10 @@
+# Default owner for everything in the repo.
+*                       @ridik-il
+
+# The embeddable, stdlib-only SDK — guard its dependency-free purity especially.
+/closure/               @ridik-il
+/scope/                 @ridik-il
+
+# CI / release / supply-chain config.
+/.github/               @ridik-il
+/.goreleaser.yaml       @ridik-il
