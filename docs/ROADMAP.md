@@ -18,22 +18,23 @@ The heart of the tool: compute `C(S, A)` correctly over all four relations.
 
 ## v0.2 — The scenario corpus
 
-Turn the 10 failure modes into the project's golden test suite and demo material.
+Turn the failure-mode corpus into the project's golden test suite and demo material.
 
-- Each scenario = `(state, action, scope, expected verdict + escaping set)` YAML under `testdata/`.
+- Each scenario = `(state, action, scope, expected verdict + escaping set)` YAML under `closure/testdata/scenarios/`.
 - A table-driven test asserts each one.
 
-**Done when:** 10 scenarios pass; each doubles as a runnable "static admission misses this, KRSM catches it" demo.
+**Done when:** every scenario in `closure/testdata/scenarios/` passes (19 today — the failure-mode corpus, a fail-closed case, a workload-update case, an in-scope *allow* case, and the k8s-model-fidelity scenarios: cluster-scoped scope, initContainer/projected/imagePullSecret/ephemeralContainer cross-refs, and `matchExpressions` selector binding); each doubles as a runnable `krsm check <dir>` "static admission misses this, KRSM catches it" demo.
 
 ## v0.3 — The scope contract
 
 Make scope declarable beyond flat lists.
 
+- **First (correctness-relevant) step — close the selector/scope asymmetry (ADR-0005 follow-on).** v0.2 made the *closure* side bind `matchExpressions` precisely, but the *scope* side is still flat identity + name-globs, so it cannot express "pods matching `app=web`." A precise closure tested against an imprecise scope still yields avoidable false **Block**s — selector precision on only one side of `C ⊆ scope(T)` is half a fix. The `selector` scope dimension must gain `matchExpressions` and, like `ownership`/`reference`, become **state-dependent** (matching a clause needs the resource's labels, i.e. `State` access — `matchScope` currently sees only a `Ref`). This is the next thing that changes a verdict, so it leads v0.3.
 - `TaskContract` → `ScopePredicate` compiler (the five dimensions: resource, ownership, namespace, selector, reference).
 - State-dependent dimensions (`ownership`/`selector`/`reference`) evaluate against the closure snapshot.
 - Inexpressible scopes emit an explicit gap signal rather than over-granting.
 
-**Done when:** a `TaskContract` YAML compiles and correctly classifies the corpus scenarios.
+**Done when:** a `TaskContract` YAML compiles and correctly classifies the corpus scenarios, **including** a scenario that is wrongly Blocked today purely because scope cannot express the selector the closure already binds.
 
 ## v0.4 — Live-cluster reads
 

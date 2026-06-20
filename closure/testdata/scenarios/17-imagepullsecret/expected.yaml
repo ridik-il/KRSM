@@ -1,0 +1,10 @@
+# A3: imagePullSecrets are now walked, so the Secret's consumer escapes scope →
+# Block. Before A3 the imagePullSecrets reference was invisible → wrongly Allowed.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Secret, namespace: prod, name: registry-cred}
+  - {kind: Deployment, namespace: prod, name: api}
+escaping:
+  - {kind: Deployment, namespace: prod, name: api}
+external: []

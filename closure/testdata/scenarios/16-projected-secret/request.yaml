@@ -1,0 +1,5 @@
+verb: delete
+target:
+  kind: Secret
+  namespace: prod
+  name: tls-secret

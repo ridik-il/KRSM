@@ -1,0 +1,10 @@
+# In-scope counterpart to #01: the cascade reaches the ReplicaSet and both Pods,
+# but the scope authorises the workload and its children, so nothing escapes → Allow.
+verdict: Allow
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: ReplicaSet, namespace: prod, name: web-7f9}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+escaping: []
+external: []

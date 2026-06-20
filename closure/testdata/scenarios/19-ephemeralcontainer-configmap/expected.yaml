@@ -1,0 +1,13 @@
+# N1: the loader now walks ephemeralContainers, so the ConfigMap's consumer (the
+# Pod) is in the closure and escapes scope → Block. Before the fix the ephemeral
+# reference was invisible, the closure was just {ConfigMap}, and the action was
+# wrongly Allowed (a missed affected resource — the same false-negative class A3
+# fixed for initContainers/projected/imagePullSecrets).
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: ConfigMap, namespace: prod, name: dbg-config}
+  - {kind: Pod, namespace: prod, name: debug-target}
+escaping:
+  - {kind: Pod, namespace: prod, name: debug-target}
+external: []

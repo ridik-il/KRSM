@@ -1,0 +1,25 @@
+# Task authorised to delete the ConfigMap `dbg-config` only. A live Pod consumes
+# it ONLY through an ephemeralContainer's envFrom — the debug-container path the
+# loader did not walk before (A3 covered initContainers but not ephemeral ones).
+# Deleting the ConfigMap breaks that container's env on its next start, so the
+# consuming Pod belongs in the closure.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dbg-config
+  namespace: prod
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-target
+  namespace: prod
+spec:
+  containers:
+    - name: app
+  ephemeralContainers:
+    - name: debugger
+      envFrom:
+        - configMapRef:
+            name: dbg-config

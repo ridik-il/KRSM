@@ -1,0 +1,10 @@
+# A1: the cluster-scoped PV resolves to namespace "" and is excluded from the
+# namespace's containment, so the closure is just the namespace + its real
+# contents — all in scope → Allow. Before A1 the PV was mis-namespaced to
+# "default", wrongly counted as contents, and escaped scope → Block.
+verdict: Allow
+closure:
+  - {kind: Namespace, namespace: "", name: default}
+  - {kind: Pod, namespace: default, name: app-1}
+escaping: []
+external: []

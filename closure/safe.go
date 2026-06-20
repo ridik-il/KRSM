@@ -15,14 +15,17 @@ import (
 // with an unbounded blast radius (DESIGN §5). This deny is reported with a
 // Reason distinct from a scope escape.
 func Safe(s State, a Action, scope []ScopeRef) Decision {
-	if _, ok := s.Get(a.Target); !ok {
+	// Closure seeds from the target only when it exists in state and always
+	// includes it, so an empty closure means the target could not be resolved:
+	// fail closed (DESIGN §5) rather than issue a second Get for the same fact.
+	c := Closure(s, a)
+	if len(c) == 0 {
 		return Decision{
 			Verdict: Block,
 			Reason:  "fail-closed: action target not found in tracked state; closure cannot be computed",
 		}
 	}
 
-	c := Closure(s, a)
 	external := ExternalEffects(s, a)
 
 	var escaping []Ref

@@ -15,7 +15,10 @@
 
 ---
 
-> **Status: early. Design-stage, building in the open.** The design and roadmap below are real and stable; the implementation is in progress (see [ROADMAP](docs/ROADMAP.md)). Stars and feedback welcome — issues especially.
+> **Status: early, building in the open.** The closure engine and its failure-mode corpus are
+> implemented and runnable today via `krsm check` (see the demo below); the live-cluster reads and
+> the admission webhook are next (see [ROADMAP](docs/ROADMAP.md)). The design and roadmap are stable.
+> Stars and feedback welcome — issues especially.
 
 ## The problem in 15 seconds
 
@@ -48,15 +51,25 @@ It then checks one thing, **before the action reaches the API server**:
 If yes, allow. If no, **deny — and return exactly which resources escaped scope**. The verdict is a decision over live state, never an LLM's opinion: *the agent proposes, an inspectable closure disposes.*
 
 ```
-$ # an agent-issued action that escapes its task scope:
+$ krsm check closure/testdata/scenarios/01-memory-pressure-cascade
 ACTION   delete Deployment/prod/web
 SCOPE    Pod/prod/web-1
-CLOSURE  Pod/prod/web-2, Pod/prod/web-3, ReplicaSet/prod/web-7f9, Service/prod/web-svc
+CLOSURE  Deployment/prod/web, Pod/prod/web-1, Pod/prod/web-2, Pod/prod/web-3, ReplicaSet/prod/web-7f9, Service/prod/web-svc
 VERDICT  ❌ BLOCK — affected-resource closure escapes task scope:
-           → Pod/prod/web-2          (live replica)
-           → Pod/prod/web-3          (live replica)
-           → Service/prod/web-svc    (loses all endpoints)
+           → Deployment/prod/web
+           → Pod/prod/web-2
+           → Pod/prod/web-3
+           → ReplicaSet/prod/web-7f9
+           → Service/prod/web-svc
+$ echo $?
+2
 ```
+
+Every failure-mode scenario under [`closure/testdata/scenarios/`](closure/testdata/scenarios)
+is a runnable demo: `krsm check <dir>` loads the scenario's `cluster.yaml` / `request.yaml` /
+`scope.yaml`, computes the closure, and prints the verdict. Exit code is **2** on a block,
+**0** on allow/warn (a `WARN` and its cross-boundary detail go to stderr), **1** on a usage or
+load error — so it scripts cleanly.
 
 ## How it works
 
@@ -90,7 +103,7 @@ KRSM is also the artifact of an ongoing **Doctor of Engineering Sciences** thesi
 
 Building in vertical slices, each shippable on its own — see **[ROADMAP](docs/ROADMAP.md)**:
 
-1. Faithful closure engine (the four relations) · 2. The 10-scenario test corpus · 3. `TaskContract` scope language · 4. Live-cluster reads · 5. The admission webhook · 6. OSS polish.
+1. Faithful closure engine (the four relations) · 2. The failure-mode test corpus (runnable via `krsm check`) · 3. `TaskContract` scope language · 4. Live-cluster reads · 5. The admission webhook · 6. OSS polish.
 
 ## Contributing & security
 

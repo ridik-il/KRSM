@@ -1,0 +1,28 @@
+# Task authorised to delete the ConfigMap `init-config` only. But a Deployment
+# consumes it ONLY in an initContainer's envFrom — a path the loader did not walk
+# before A3 — so deleting it breaks the migrator's init on next roll-out. The
+# consuming workload must appear in the closure.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: migrator
+  namespace: prod
+  labels: {app: migrator}
+spec:
+  selector:
+    matchLabels: {app: migrator}
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          envFrom:
+            - configMapRef: {name: init-config}
+      containers:
+        - name: app

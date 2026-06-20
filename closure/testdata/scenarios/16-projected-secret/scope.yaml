@@ -1,0 +1,4 @@
+scope:
+  - kind: Secret
+    namespace: prod
+    name: tls-secret

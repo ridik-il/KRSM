@@ -1,0 +1,5 @@
+# Cascade-delete the whole namespace.
+verb: delete
+target:
+  kind: Namespace
+  name: default

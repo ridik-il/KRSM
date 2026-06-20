@@ -98,7 +98,7 @@ func selectorChanged(a Action) bool {
 	if a.Old == nil || a.New == nil {
 		return false
 	}
-	return !sameLabels(a.Old.Selector, a.New.Selector)
+	return !a.Old.Selector.equal(a.New.Selector)
 }
 
 // labelsChanged reports whether a mutation alters the object's labels (which can

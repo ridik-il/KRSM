@@ -1,0 +1,26 @@
+# A NetworkPolicy whose podSelector is EXPRESSION-only: `tier In [web]`. The task
+# deletes an in-scope Pod whose tier is `db` — the policy does NOT select it, so
+# the Pod's deletion has no effect on the policy and the closure is just the Pod.
+#
+# Before A2 the loader dropped matchExpressions, collapsing the selector to the
+# empty selector; on a NetworkPolicy the empty selector binds EVERY pod in the
+# namespace, so the policy was spuriously pulled into the closure and — being out
+# of scope — wrongly Blocked the action. With matchExpressions parsed and
+# evaluated by LabelSelector.Matches, the binding is precise.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-allow
+  namespace: prod
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: tier, operator: In, values: [web]}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-1
+  namespace: prod
+  labels: {app: store, tier: db}

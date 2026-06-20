@@ -1,0 +1,26 @@
+# Task authorised to delete Secret `registry-cred` only. A Deployment references
+# it via imagePullSecrets — pod-level, neither a volume nor an env ref — so before
+# A3 it was invisible. Deleting it breaks image pulls on the next roll-out; the
+# consuming workload belongs in the closure.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-cred
+  namespace: prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+  labels: {app: api}
+spec:
+  selector:
+    matchLabels: {app: api}
+  template:
+    spec:
+      imagePullSecrets:
+        - name: registry-cred
+      containers:
+        - name: app

@@ -60,10 +60,11 @@ type OwnerRef struct {
 type RefKind int
 
 const (
-	RefVolume      RefKind = iota // pod volume → ConfigMap/Secret/PVC
-	RefEnvFrom                    // container envFrom → ConfigMap/Secret
-	RefEnv                        // container env[].valueFrom → ConfigMap/Secret
-	RefScaleTarget                // HPA spec.scaleTargetRef → workload
+	RefVolume          RefKind = iota // pod volume → ConfigMap/Secret/PVC
+	RefEnvFrom                        // container envFrom → ConfigMap/Secret
+	RefEnv                            // container env[].valueFrom → ConfigMap/Secret
+	RefScaleTarget                    // HPA spec.scaleTargetRef → workload
+	RefImagePullSecret                // pod imagePullSecrets → Secret
 )
 
 // CrossRef is a consumer's explicit reference to another object.
@@ -77,7 +78,7 @@ type CrossRef struct {
 type Object struct {
 	Ref        Ref
 	Labels     map[string]string
-	Selector   map[string]string // Service/PDB/NetworkPolicy/workload selector, flattened
+	Selector   LabelSelector // Service/PDB/NetworkPolicy/workload selector (matchLabels + matchExpressions)
 	Owners     []OwnerRef
 	CrossRefs  []CrossRef
 	Finalizers []string

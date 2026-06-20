@@ -1,0 +1,6 @@
+# Delete the db Pod the web-only policy does not select.
+verb: delete
+target:
+  kind: Pod
+  namespace: prod
+  name: db-1

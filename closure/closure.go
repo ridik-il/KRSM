@@ -94,7 +94,7 @@ func Closure(s State, a Action) []Ref {
 // PodsMatching, so it works for any State implementation (no concrete type).
 func selectorMutationAffected(s State, a Action) []Ref {
 	out := map[string]Ref{}
-	add := func(sel map[string]string) {
+	add := func(sel LabelSelector) {
 		for _, p := range s.PodsMatching(a.Target.Namespace, sel, a.Target.GVK.Kind) {
 			out[p.key()] = p
 		}

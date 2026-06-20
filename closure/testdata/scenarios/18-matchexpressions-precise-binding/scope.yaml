@@ -1,0 +1,5 @@
+# The task authorised deleting the db Pod — NOT touching the web NetworkPolicy.
+scope:
+  - kind: Pod
+    namespace: prod
+    name: db-1
