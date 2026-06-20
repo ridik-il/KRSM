@@ -38,7 +38,7 @@ archives:
       - CHANGELOG.md
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
-checksums:
+checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
@@ -67,9 +67,8 @@ release:
     name: krsm
   draft: false
   prerelease: auto      # v0.x and -rc/-beta tags are flagged pre-release automatically
-  # Body = this tag's CHANGELOG.md section, exported as $RELEASE_NOTES by the workflow.
-  body: |
-    {{ .Env.RELEASE_NOTES }}
+  # The release body is supplied by the workflow via `--release-notes <file>` (this
+  # tag's CHANGELOG.md section); the release block has no `body` field in goreleaser v2.
 
 # goreleaser's commit-grouped changelog is redundant with the curated CHANGELOG.md.
 changelog:

@@ -52,9 +52,20 @@ on push/schedule. Add **Dependabot** (gomod + github-actions), **CODEOWNERS**, a
 template. golangci-lint is pinned to **v1.64.8** to match the local toolchain; migrating to
 golangci-lint v2 (a config-schema change) is deferred.
 
-**Branch protection on `main`** requires these checks to merge: `build-test`, `lint`,
-`govulncheck`, `dependency-review`, and CodeQL `analyze`. Scorecard runs on push/schedule
-(never on PRs) so it is *not* a required check.
+`staticcheck` and `govulncheck` run in **their own jobs on the latest stable Go** (their
+installers require current Go, e.g. `staticcheck@latest` needs Go ≥ 1.25), while `build-test`
+runs on the project's minimum Go from `go.mod` so the SDK's stated compatibility is actually
+tested; lint/scan failures therefore never mask the build/test result. govulncheck runs
+directly (`go install …/govulncheck@latest && govulncheck ./...`) rather than via a wrapper
+action.
+
+**The repository is public.** CodeQL, dependency-review, and OpenSSF Scorecard require either a
+public repository or paid GitHub Advanced Security; the project is OSS ("building in the open"),
+so it is public and these run for free.
+
+**Branch protection on `main`** requires these checks to merge: `build-test`, `staticcheck`,
+`lint`, `govulncheck`, `dependency-review`, and CodeQL `analyze`. Scorecard runs on
+push/schedule (never on PRs) so it is *not* a required check.
 
 ## Consequences
 
