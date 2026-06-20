@@ -6,8 +6,10 @@
 
 *Kubernetes Remediation Scope Model — stop an AI agent's action before it runs if its real blast radius escapes the task it was given.*
 
-[![CI](https://img.shields.io/badge/CI-pending-lightgrey)](#)
-[![Go Reference](https://img.shields.io/badge/go-reference-blue)](#)
+[![CI](https://github.com/ridik-il/krsm/actions/workflows/ci.yml/badge.svg)](https://github.com/ridik-il/krsm/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/ridik-il/krsm/actions/workflows/codeql.yml/badge.svg)](https://github.com/ridik-il/krsm/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/ridik-il/krsm/badge)](https://securityscorecards.dev/viewer/?uri=github.com/ridik-il/krsm)
+[![Go Reference](https://pkg.go.dev/badge/github.com/ridik-il/krsm.svg)](https://pkg.go.dev/github.com/ridik-il/krsm)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-early%20design-orange)](docs/ROADMAP.md)
 

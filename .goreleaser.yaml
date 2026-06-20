@@ -1,0 +1,91 @@
+# .goreleaser.yaml — release-time CLI build + checksums + SBOM + keyless signing.
+# Dev/CI-only tooling: nothing here touches the `closure`/`scope` SDK dependency graph
+# (closure stays stdlib-only, guarded by internal/archguard).
+# Local dry run:  make snapshot   (== goreleaser release --snapshot --clean; no publish/sign)
+version: 2
+
+project_name: krsm
+
+before:
+  hooks:
+    # download (not `tidy`) so the working tree stays clean — goreleaser refuses to
+    # release from a dirty tree, and `go mod tidy` could rewrite go.mod/go.sum.
+    - go mod download
+
+builds:
+  - id: krsm
+    main: ./cmd/krsm
+    binary: krsm
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # The git tag drives the binary version. {{.Version}} is the tag without 'v'.
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: krsm
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# One SPDX SBOM per archive (syft is installed by the release workflow).
+sboms:
+  - id: archive-sbom
+    artifacts: archive
+
+# Keyless cosign signature over checksums.txt — which covers every artifact by hash.
+# Needs id-token: write in the workflow. Emits checksums.txt.{sig,pem}.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+release:
+  github:
+    owner: ridik-il
+    name: krsm
+  draft: false
+  prerelease: auto      # v0.x and -rc/-beta tags are flagged pre-release automatically
+  # The release body is supplied by the workflow via `--release-notes <file>` (this
+  # tag's CHANGELOG.md section); the release block has no `body` field in goreleaser v2.
+
+# goreleaser's commit-grouped changelog is redundant with the curated CHANGELOG.md.
+changelog:
+  disable: true
+
+# ── v0.5 forward-look (DO NOT BUILD YET) ─────────────────────────────────────
+# When the validating webhook lands, publish a distroless image to GHCR with `ko`
+# (no Dockerfile) and cosign-sign it via the same OIDC identity. Sketch only:
+#
+# kos:
+#   - id: webhook
+#     build: krsm                        # or a dedicated ./cmd/krsm-webhook
+#     base_image: gcr.io/distroless/static:nonroot
+#     repositories: [ghcr.io/ridik-il/krsm]
+#     tags: ["{{ .Version }}", latest]
+#     bare: true
+# docker_signs:
+#   - cmd: cosign
+#     args: [sign, "${artifact}", "--yes"]
+#     artifacts: all
