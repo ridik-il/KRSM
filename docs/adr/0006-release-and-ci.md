@@ -49,8 +49,9 @@ stub in `.goreleaser.yaml`, not built now.
 add least-privilege `permissions:`, `concurrency` cancellation, coverage, **govulncheck**, and
 PR **dependency-review**. Add **CodeQL** (Go SAST) and **OpenSSF Scorecard** (+ README badge)
 on push/schedule. Add **Dependabot** (gomod + github-actions), **CODEOWNERS**, and a PR
-template. golangci-lint is pinned to **v1.64.8** to match the local toolchain; migrating to
-golangci-lint v2 (a config-schema change) is deferred.
+template. golangci-lint uses **v2** (pinned `v2.12.2`); `.golangci.yml` is v2-schema (migrated via
+`golangci-lint migrate`, the standard set + bodyclose/errorlint/misspell/revive/unconvert, with
+gofmt/goimports as formatters), and the action is `golangci-lint-action@v9` which only drives v2.
 
 `staticcheck` and `govulncheck` run in **their own jobs on the latest stable Go** (their
 installers require current Go, e.g. `staticcheck@latest` needs Go ≥ 1.25), while `build-test`
@@ -78,7 +79,7 @@ push/schedule (never on PRs) so it is *not* a required check.
   then `git tag vX.Y.Z && git push --tags`; the rest is automated. (The maintainer runs the tag.)
 - **`closure` stays stdlib-only.** goreleaser, syft, cosign, and the scanners are CI/dev tooling;
   none enters `go.mod` — still enforced by `internal/archguard`.
-- **Deferred (tracked):** golangci-lint v2 migration; the webhook image (v0.5); SLSA provenance
+- **Deferred (tracked):** the webhook image (v0.5); SLSA provenance
   attestation and a Homebrew tap (v1.0); Codecov integration.
 - **Cost:** SHA pins are unreadable without the version comment and need Dependabot to stay
   current; four workflow files instead of one; goreleaser/cosign/syft become CI prerequisites.
