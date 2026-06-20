@@ -1,0 +1,8 @@
+# A2: the `tier In [web]` policy does not select the db Pod, so the closure is
+# just the Pod — in scope → Allow. Before A2 the dropped selector bound every pod,
+# pulled the out-of-scope NetworkPolicy in, and wrongly Blocked.
+verdict: Allow
+closure:
+  - {kind: Pod, namespace: prod, name: db-1}
+escaping: []
+external: []

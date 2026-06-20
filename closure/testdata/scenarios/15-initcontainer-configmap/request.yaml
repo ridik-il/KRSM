@@ -1,0 +1,6 @@
+# Delete the ConfigMap the initContainer depends on.
+verb: delete
+target:
+  kind: ConfigMap
+  namespace: prod
+  name: init-config

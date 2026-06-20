@@ -1,0 +1,29 @@
+# Task authorised to delete Secret `tls-secret` only. A Deployment consumes it
+# ONLY through a projected volume source — another path the loader did not walk
+# before A3. Deleting the Secret breaks the mount on the next roll-out, so the
+# consuming workload belongs in the closure.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-secret
+  namespace: prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+  template:
+    spec:
+      volumes:
+        - name: certs
+          projected:
+            sources:
+              - secret: {name: tls-secret}
+      containers:
+        - name: app

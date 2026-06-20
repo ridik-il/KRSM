@@ -1,0 +1,23 @@
+# Task: tear down the `default` namespace and everything it contains. The agent
+# issues `delete namespace default`. A PersistentVolume is CLUSTER-SCOPED — it
+# lives in no namespace and survives a namespace deletion — so it must NOT appear
+# in the closure of a namespace delete. (Before A1 the loader mis-namespaced the
+# PV to "default", so it was wrongly counted as namespace contents.)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-1
+  namespace: default
+  labels: {app: app}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: data-pv
+spec: {}

@@ -1,0 +1,12 @@
+# A3: the loader now walks initContainers, so the ConfigMap's consumer (the
+# Deployment) is in the closure and escapes scope → Block. Before A3 the
+# initContainer reference was invisible, the closure was just {ConfigMap}, and the
+# action was wrongly Allowed (a true false negative — a missed affected resource).
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: ConfigMap, namespace: prod, name: init-config}
+  - {kind: Deployment, namespace: prod, name: migrator}
+escaping:
+  - {kind: Deployment, namespace: prod, name: migrator}
+external: []

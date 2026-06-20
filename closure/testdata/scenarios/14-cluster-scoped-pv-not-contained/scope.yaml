@@ -1,0 +1,8 @@
+# The task authorised deleting the namespace and its (namespaced) contents — NOT
+# the cluster-scoped PersistentVolume.
+scope:
+  - kind: Namespace
+    name: default
+  - kind: Pod
+    namespace: default
+    name: "app-*"

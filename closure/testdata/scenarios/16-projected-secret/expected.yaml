@@ -1,0 +1,10 @@
+# A3: projected volume sources are now walked, so the Secret's consumer escapes
+# scope → Block. Before A3 the projected reference was invisible → wrongly Allowed.
+verdict: Block
+reason: "escapes task scope"
+closure:
+  - {kind: Secret, namespace: prod, name: tls-secret}
+  - {kind: Deployment, namespace: prod, name: web}
+escaping:
+  - {kind: Deployment, namespace: prod, name: web}
+external: []

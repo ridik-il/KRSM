@@ -100,38 +100,56 @@ type rawMetadata struct {
 // (workload pod templates) — the latter is where real workloads actually declare
 // their ConfigMap/Secret/PVC consumption. Parsing only the top level would make
 // every workload's mounts invisible.
-type rawPodSpec struct {
-	Volumes []struct {
-		ConfigMap *struct {
+type rawVolume struct {
+	ConfigMap *struct {
+		Name string `json:"name"`
+	} `json:"configMap"`
+	Secret *struct {
+		SecretName string `json:"secretName"`
+	} `json:"secret"`
+	PVC *struct {
+		ClaimName string `json:"claimName"`
+	} `json:"persistentVolumeClaim"`
+	Projected *struct {
+		Sources []struct {
+			ConfigMap *struct {
+				Name string `json:"name"`
+			} `json:"configMap"`
+			Secret *struct {
+				Name string `json:"name"`
+			} `json:"secret"`
+		} `json:"sources"`
+	} `json:"projected"`
+}
+
+type rawContainer struct {
+	EnvFrom []struct {
+		ConfigMapRef *struct {
 			Name string `json:"name"`
-		} `json:"configMap"`
-		Secret *struct {
-			SecretName string `json:"secretName"`
-		} `json:"secret"`
-		PVC *struct {
-			ClaimName string `json:"claimName"`
-		} `json:"persistentVolumeClaim"`
-	} `json:"volumes"`
-	Containers []struct {
-		EnvFrom []struct {
-			ConfigMapRef *struct {
+		} `json:"configMapRef"`
+		SecretRef *struct {
+			Name string `json:"name"`
+		} `json:"secretRef"`
+	} `json:"envFrom"`
+	Env []struct {
+		ValueFrom *struct {
+			ConfigMapKeyRef *struct {
 				Name string `json:"name"`
-			} `json:"configMapRef"`
-			SecretRef *struct {
+			} `json:"configMapKeyRef"`
+			SecretKeyRef *struct {
 				Name string `json:"name"`
-			} `json:"secretRef"`
-		} `json:"envFrom"`
-		Env []struct {
-			ValueFrom *struct {
-				ConfigMapKeyRef *struct {
-					Name string `json:"name"`
-				} `json:"configMapKeyRef"`
-				SecretKeyRef *struct {
-					Name string `json:"name"`
-				} `json:"secretKeyRef"`
-			} `json:"valueFrom"`
-		} `json:"env"`
-	} `json:"containers"`
+			} `json:"secretKeyRef"`
+		} `json:"valueFrom"`
+	} `json:"env"`
+}
+
+type rawPodSpec struct {
+	Volumes          []rawVolume    `json:"volumes"`
+	Containers       []rawContainer `json:"containers"`
+	InitContainers   []rawContainer `json:"initContainers"`
+	ImagePullSecrets []struct {
+		Name string `json:"name"`
+	} `json:"imagePullSecrets"`
 }
 
 type rawSpec struct {
@@ -157,8 +175,29 @@ func gvkOf(apiVersion, kind string) closure.GVK {
 	return g
 }
 
+// clusterScopedKinds are the standard Kubernetes kinds that exist outside any
+// namespace. A cluster-scoped object resolves to namespace "" regardless of input,
+// so it is never counted as the contents of a namespace and matches scope clauses
+// on "". Custom cluster-scoped CRDs need live discovery and are deferred to v0.4;
+// YAML cannot distinguish an absent namespace from an explicit empty one.
+var clusterScopedKinds = map[string]bool{
+	"Namespace":                      true,
+	"Node":                           true,
+	"PersistentVolume":               true,
+	"ClusterRole":                    true,
+	"ClusterRoleBinding":             true,
+	"StorageClass":                   true,
+	"PriorityClass":                  true,
+	"CustomResourceDefinition":       true,
+	"IngressClass":                   true,
+	"APIService":                     true,
+	"ValidatingWebhookConfiguration": true,
+	"MutatingWebhookConfiguration":   true,
+	"RuntimeClass":                   true,
+}
+
 func nsOf(kind, ns string) string {
-	if kind == "Namespace" {
+	if clusterScopedKinds[kind] {
 		return ""
 	}
 	if ns == "" {
@@ -175,15 +214,15 @@ func uidOf(kind, ns, name string) string {
 // map, NetworkPolicy uses spec.podSelector.matchLabels, others use
 // spec.selector.matchLabels. A present-but-empty selector is a non-nil empty map
 // (matches all); an absent selector is nil.
-func selectorFrom(kind string, spec rawSpec) map[string]string {
+func selectorFrom(kind string, spec rawSpec) closure.LabelSelector {
 	switch kind {
 	case "Service":
 		if spec.Selector == nil {
-			return nil
+			return closure.LabelSelector{} // absent → binds nothing
 		}
 		m := map[string]string{}
 		_ = json.Unmarshal(spec.Selector, &m)
-		return m
+		return closure.LabelSelector{MatchLabels: m}
 	case "NetworkPolicy":
 		return matchLabels(spec.PodSelector)
 	default:
@@ -191,18 +230,36 @@ func selectorFrom(kind string, spec rawSpec) map[string]string {
 	}
 }
 
-func matchLabels(raw json.RawMessage) map[string]string {
+// matchLabels resolves a `{matchLabels, matchExpressions}` selector wrapper. An
+// absent wrapper yields the nil selector (binds nothing); a wrapper carrying
+// neither field yields a non-nil empty map (present-empty → kind decides).
+// matchExpressions are captured so set-based requirements (In/NotIn/Exists/
+// DoesNotExist) bind precisely rather than collapsing to the empty selector.
+func matchLabels(raw json.RawMessage) closure.LabelSelector {
 	if raw == nil {
-		return nil
+		return closure.LabelSelector{}
 	}
 	var wrap struct {
-		MatchLabels map[string]string `json:"matchLabels"`
+		MatchLabels      map[string]string `json:"matchLabels"`
+		MatchExpressions []struct {
+			Key      string   `json:"key"`
+			Operator string   `json:"operator"`
+			Values   []string `json:"values"`
+		} `json:"matchExpressions"`
 	}
 	_ = json.Unmarshal(raw, &wrap)
-	if wrap.MatchLabels == nil {
-		return map[string]string{} // present but empty → matches all
+	sel := closure.LabelSelector{MatchLabels: wrap.MatchLabels}
+	for _, e := range wrap.MatchExpressions {
+		sel.MatchExpressions = append(sel.MatchExpressions, closure.SelectorRequirement{
+			Key:      e.Key,
+			Operator: closure.SelectorOperator(e.Operator),
+			Values:   e.Values,
+		})
 	}
-	return wrap.MatchLabels
+	if wrap.MatchLabels == nil && len(sel.MatchExpressions) == 0 {
+		sel.MatchLabels = map[string]string{} // present but empty → matches all
+	}
+	return sel
 }
 
 func crossRefsFrom(ns string, spec rawSpec) []closure.CrossRef {
@@ -229,9 +286,21 @@ func podSpecCrossRefs(ns string, ps rawPodSpec) []closure.CrossRef {
 			out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: v.Secret.SecretName, UID: uidOf("Secret", ns, v.Secret.SecretName)}})
 		case v.PVC != nil:
 			out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "PersistentVolumeClaim"}, Namespace: ns, Name: v.PVC.ClaimName, UID: uidOf("PersistentVolumeClaim", ns, v.PVC.ClaimName)}})
+		case v.Projected != nil:
+			for _, src := range v.Projected.Sources {
+				if src.ConfigMap != nil {
+					out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: src.ConfigMap.Name, UID: uidOf("ConfigMap", ns, src.ConfigMap.Name)}})
+				}
+				if src.Secret != nil {
+					out = append(out, closure.CrossRef{Kind: closure.RefVolume, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: src.Secret.Name, UID: uidOf("Secret", ns, src.Secret.Name)}})
+				}
+			}
 		}
 	}
-	for _, c := range ps.Containers {
+	// initContainers consume ConfigMaps/Secrets exactly as regular containers do
+	// (a broken mount/env fails the pod on its next start), so walk both.
+	containers := append(append([]rawContainer{}, ps.Containers...), ps.InitContainers...)
+	for _, c := range containers {
 		for _, e := range c.EnvFrom {
 			if e.ConfigMapRef != nil {
 				out = append(out, closure.CrossRef{Kind: closure.RefEnvFrom, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "ConfigMap"}, Namespace: ns, Name: e.ConfigMapRef.Name, UID: uidOf("ConfigMap", ns, e.ConfigMapRef.Name)}})
@@ -251,6 +320,9 @@ func podSpecCrossRefs(ns string, ps rawPodSpec) []closure.CrossRef {
 				out = append(out, closure.CrossRef{Kind: closure.RefEnv, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: r.Name, UID: uidOf("Secret", ns, r.Name)}})
 			}
 		}
+	}
+	for _, ips := range ps.ImagePullSecrets {
+		out = append(out, closure.CrossRef{Kind: closure.RefImagePullSecret, Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: ns, Name: ips.Name, UID: uidOf("Secret", ns, ips.Name)}})
 	}
 	return out
 }
@@ -322,6 +394,13 @@ type rawAction struct {
 	New     *rawPayload `json:"new"`
 }
 
+// payloadSelector wraps an action payload's flat selector map as a LabelSelector.
+// A nil map stays the nil selector (binds nothing); the request format carries
+// only matchLabels-style selectors.
+func payloadSelector(m map[string]string) closure.LabelSelector {
+	return closure.LabelSelector{MatchLabels: m}
+}
+
 func parseAction(raw []byte) (closure.Action, error) {
 	var ra rawAction
 	if err := yaml.Unmarshal(raw, &ra); err != nil {
@@ -334,10 +413,10 @@ func parseAction(raw []byte) (closure.Action, error) {
 		Cascade: ra.Cascade == nil || *ra.Cascade,
 	}
 	if ra.Old != nil {
-		a.Old = &closure.Object{Labels: ra.Old.Labels, Selector: ra.Old.Selector, Finalizers: ra.Old.Finalizers}
+		a.Old = &closure.Object{Labels: ra.Old.Labels, Selector: payloadSelector(ra.Old.Selector), Finalizers: ra.Old.Finalizers}
 	}
 	if ra.New != nil {
-		a.New = &closure.Object{Labels: ra.New.Labels, Selector: ra.New.Selector, Finalizers: ra.New.Finalizers}
+		a.New = &closure.Object{Labels: ra.New.Labels, Selector: payloadSelector(ra.New.Selector), Finalizers: ra.New.Finalizers}
 	}
 	return a, nil
 }

@@ -16,7 +16,7 @@ type State interface {
 	// ownerKind determining empty-selector semantics. It lets callers evaluate
 	// a candidate selector (e.g. the old/new selector of a mutation) without
 	// reconstructing state — keeping closure free of any concrete State type.
-	PodsMatching(ns string, selector map[string]string, ownerKind string) []Ref
+	PodsMatching(ns string, selector LabelSelector, ownerKind string) []Ref
 	// SelectorsTargeting returns Service/PDB/NetworkPolicy whose selector
 	// matches the given pod.
 	SelectorsTargeting(pod Ref) []Ref
@@ -107,7 +107,7 @@ func (s *scanState) PodsSelectedBy(r Ref) []Ref {
 	return s.PodsMatching(owner.Ref.Namespace, owner.Selector, owner.Ref.GVK.Kind)
 }
 
-func (s *scanState) PodsMatching(ns string, selector map[string]string, ownerKind string) []Ref {
+func (s *scanState) PodsMatching(ns string, selector LabelSelector, ownerKind string) []Ref {
 	var out []Ref
 	for i := range s.objs {
 		o := &s.objs[i]
@@ -187,24 +187,15 @@ func (s *scanState) ControllersTargeting(r Ref) []Ref {
 // while an empty NetworkPolicy/PodDisruptionBudget/workload selector binds every
 // pod in the namespace (corpus #8, the degenerate `podSelector: {}`). A nil
 // selector binds nothing for any kind.
-func selectorBinds(ownerKind string, selector, labels map[string]string) bool {
-	if selector == nil {
+func selectorBinds(ownerKind string, selector LabelSelector, labels map[string]string) bool {
+	if selector.isNil() {
 		return false
 	}
-	if len(selector) == 0 {
+	if len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
+		// present but empty `{}`: the kind decides.
 		return ownerKind != "Service"
 	}
-	return subsetOf(selector, labels)
-}
-
-// subsetOf reports whether every key/value in sel is present in labels.
-func subsetOf(sel, labels map[string]string) bool {
-	for k, v := range sel {
-		if labels[k] != v {
-			return false
-		}
-	}
-	return true
+	return selector.Matches(labels)
 }
 
 // crossRefMatches compares a cross-reference target against a resource, by uid

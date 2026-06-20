@@ -1,0 +1,5 @@
+# The task authorised deleting the ConfigMap — NOT disrupting the migrator workload.
+scope:
+  - kind: ConfigMap
+    namespace: prod
+    name: init-config
