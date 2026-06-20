@@ -83,7 +83,7 @@ jobs:
           go-version-file: go.mod   # golangci-lint v1.64.8 targets this Go line
           cache: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
           # Pinned to match the local toolchain; .golangci.yml is v1-format.
           # Migrating to golangci-lint v2 is tracked separately (ADR-0006).
