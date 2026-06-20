@@ -6,9 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-20
+
 ### Added
-- Project scaffolding: README, design doc, roadmap, ADRs, and CI.
-- `krsm` CLI skeleton (`version`, `help`).
 - `krsm check [--plain] <dir>` — runs the closure check for a scenario directory
   (`cluster.yaml` / `request.yaml` / `scope.yaml`) and prints the
   `ACTION` / `SCOPE` / `CLOSURE` / `VERDICT` report. Exit codes: `0` allow/warn,
@@ -26,7 +26,7 @@ All notable changes to this project are documented here. The format follows
   and `ephemeralContainers`; faithful label selectors — a pure-stdlib
   `LabelSelector` with `matchLabels` + `matchExpressions` (`In`/`NotIn`/`Exists`/
   `DoesNotExist`, absence-sensitive) so set-based selectors bind precisely instead
-  of collapsing to the empty selector.
+  of collapsing to the empty selector. Adds golden scenarios 14–19.
 - The scenario loader rejects an unrecognised selector operator instead of
   silently binding nothing (fail-closed at the parse boundary), and a safety-
   invariant test asserts no namespaced kind is mislabelled cluster-scoped.
@@ -42,4 +42,22 @@ All notable changes to this project are documented here. The format follows
   `matchLabels`-only selector reduces to the previous subset test, so the golden
   scenarios are unchanged; external embedders (none yet) would need to adapt.
 
-[Unreleased]: https://github.com/ridik-il/krsm/commits/main
+## [0.1.0] - 2026-06-19
+
+### Added
+- Project scaffolding: README, design doc (`docs/DESIGN.md`), roadmap, ADRs
+  0001–0004, Apache-2.0 license, and CI (`gofmt`, `golangci-lint`, `staticcheck`,
+  `go test -race`).
+- `krsm` CLI skeleton (`version`, `help`).
+- `closure` — the embeddable, stdlib-only closure engine: model types
+  (`GVK`/`Ref`/`Object`/`Action`/`Decision`), the four relations (ownerReference
+  cascade, namespace containment, label-selector binding, cross-resource
+  reference), effect-class gating per verb, a breadth-first closure walk with a
+  visited-set guard (`|C| ≤ |R|`, terminating on cyclic ownerReferences), and the
+  `Safe` verdict (scope-subset test, fail-closed on an unresolvable target).
+- The failure-mode scenario corpus as golden tests under
+  `closure/testdata/scenarios/`.
+
+[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ridik-il/krsm/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/ridik-il/krsm/releases/tag/v0.1.0
