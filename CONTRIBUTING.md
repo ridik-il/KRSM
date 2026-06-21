@@ -27,6 +27,16 @@ Toolchain: Go per `go.mod` (the CI source of truth), `gofmt -s`, `golangci-lint`
 2. One logical change per PR; keep commits small and messages clear.
 3. Update docs/ADRs alongside the code.
 4. Ensure `make check` and CI are green.
+5. **Sign your commits.** `main` requires verified signatures. Configure SSH or GPG
+   signing once and enable it by default:
+
+   ```bash
+   git config --global gpg.format ssh
+   git config --global user.signingkey ~/.ssh/<your_key>.pub
+   git config --global commit.gpgsign true
+   ```
+
+   Then add the same key to GitHub as a **signing** key (Settings → SSH and GPG keys).
 
 ## Maintainers
 
