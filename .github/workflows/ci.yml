@@ -122,3 +122,34 @@ jobs:
           # KRSM is Apache-2.0; deny copyleft that would conflict with embedding in
           # commercial agents.
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+
+  # PR-only: every commit in the PR must carry a verified signature (ADR-0007).
+  # We read GitHub's own verification status via the API, so CI checks the exact
+  # thing the `main` required-signatures rule enforces — and a PR cannot merge
+  # with an unsigned/untrusted commit even before that branch rule is hit. No
+  # checkout and no third-party action (nothing to SHA-pin): just the gh CLI
+  # preinstalled on the runner.
+  signed-commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify all PR commits are signed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # A commit is acceptable only if verification.verified == true. List any
+          # that are not, with GitHub's reason (unsigned, unknown_key, expired, …).
+          unverified=$(gh api --paginate "repos/$REPO/pulls/$PR/commits" \
+            --jq '.[] | select(.commit.verification.verified != true)
+                       | "\(.sha[0:12])  \(.commit.verification.reason)"')
+          if [ -n "$unverified" ]; then
+            echo "::error::PR contains commits without a verified signature:"
+            echo "$unverified"
+            echo "Sign your commits (see CONTRIBUTING.md) and force-push the rebased branch."
+            exit 1
+          fi
+          echo "All PR commits carry a verified signature."
