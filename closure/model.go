@@ -106,12 +106,28 @@ type Action struct {
 	New     *Object
 }
 
-// ScopeRef is one clause of a task's authorised scope (v0.1: flat identity).
-// Name may be a glob ("*"); Group/Version are optional and ignored when empty.
-type ScopeRef struct {
+// ScopeDim is the relation dimension a scope clause authorises along (DESIGN §6).
+type ScopeDim string
+
+const (
+	DimResource ScopeDim = "resource" // flat identity: GVK + namespace + name(glob)
+	DimSelector ScopeDim = "selector" // pods/objects whose labels satisfy Selector
+)
+
+// ScopeClause is one allow-clause of a task's authorised scope. Exactly one
+// dimension's fields are meaningful, chosen by Dim. An empty Dim is read as
+// DimResource for backward compatibility with v0.1/v0.2 flat scopes.
+//
+// DimResource is the v0.1 flat-identity clause: Name may be a glob ("*"), and
+// Group/Version are optional (ignored when empty). DimSelector is state-dependent:
+// it matches a candidate whose live labels satisfy Selector, gated by the same
+// GVK/Namespace fields (see matchScope).
+type ScopeClause struct {
+	Dim       ScopeDim
 	GVK       GVK
 	Namespace string
-	Name      string
+	Name      string        // DimResource only: identity or path.Match glob
+	Selector  LabelSelector // DimSelector only: matchLabels + matchExpressions
 }
 
 // Verdict is the allow/deny decision, ordered Allow < Warn < Block.

@@ -1,0 +1,47 @@
+# Task: restart the `frontend` Deployment. The restart is Disruptive, so the
+# closure binds every `app=web` Pod the workload selects — and, crucially, ALSO any
+# `app=web` Pod that shares no name stem with the Deployment (PodsSelectedBy is
+# ownership-independent: it matches by label, not ownerReference). Here that is
+# `frontend-aaa` (the workload's own pod) AND `worker-bbb` (a different workload's
+# pod that happens to carry app=web). `db-ccc` (app=db) is the decoy — not selected.
+#
+# This is the scope counterpart to ADR-0005's closure-side fix: the closure binds
+# the two app=web pods precisely, but a flat-identity scope cannot cover both
+# `frontend-aaa` and `worker-bbb` without a `*` glob — which would also grant
+# `db-ccc`, defeating precision. Only a selector-dim scope clause (`app In [web]`)
+# covers exactly the two pods and nothing else → Allow. Without it (scope treated as
+# resource-only) those pods escape → a wrongly-issued Block.
+#
+# No Service/PDB/NetworkPolicy: keeps the closure to the Deployment + its selected
+# pods, so the proof is about scope precision and nothing else.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: frontend-aaa
+  namespace: prod
+  labels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker-bbb
+  namespace: prod
+  labels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-ccc
+  namespace: prod
+  labels: {app: db}

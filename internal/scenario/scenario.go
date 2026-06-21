@@ -24,7 +24,7 @@ import (
 type Scenario struct {
 	State  closure.State
 	Action closure.Action
-	Scope  []closure.ScopeRef
+	Scope  []closure.ScopeClause
 }
 
 // Load reads cluster.yaml, request.yaml and scope.yaml from dir and builds a
@@ -447,16 +447,54 @@ func parseAction(raw []byte) (closure.Action, error) {
 	return a, nil
 }
 
-func parseScope(raw []byte) ([]closure.ScopeRef, error) {
+// rawScopeClause is a dimension-typed scope clause. A clause with no `dim` (every
+// v0.1/v0.2 scope.yaml) loads as DimResource and matches by name exactly as before.
+// A `dim: selector` clause carries a `{matchLabels, matchExpressions}` selector,
+// built by the same matchLabels conversion the cluster loader uses for
+// Object.Selector — one selector parse path.
+type rawScopeClause struct {
+	Dim       string `json:"dim"`
+	Group     string `json:"group"`
+	Version   string `json:"version"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 	var rs struct {
-		Scope []rawRef `json:"scope"`
+		Scope []json.RawMessage `json:"scope"`
 	}
 	if err := yaml.Unmarshal(raw, &rs); err != nil {
 		return nil, fmt.Errorf("parse scope: %w", err)
 	}
-	out := make([]closure.ScopeRef, 0, len(rs.Scope))
-	for _, r := range rs.Scope {
-		out = append(out, closure.ScopeRef{GVK: closure.GVK{Group: r.Group, Version: r.Version, Kind: r.Kind}, Namespace: nsOf(r.Kind, r.Namespace), Name: r.Name})
+	out := make([]closure.ScopeClause, 0, len(rs.Scope))
+	for _, rawClause := range rs.Scope {
+		var rc rawScopeClause
+		if err := json.Unmarshal(rawClause, &rc); err != nil {
+			return nil, fmt.Errorf("parse scope clause: %w", err)
+		}
+		clause := closure.ScopeClause{
+			Dim:       closure.ScopeDim(rc.Dim),
+			GVK:       closure.GVK{Group: rc.Group, Version: rc.Version, Kind: rc.Kind},
+			Namespace: nsOf(rc.Kind, rc.Namespace),
+			Name:      rc.Name,
+		}
+		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
+			sel, err := matchLabels(rawClause)
+			if err != nil {
+				return nil, fmt.Errorf("parse selector scope clause: %w", err)
+			}
+			// matchLabels turns a present-but-empty selector into a non-nil empty
+			// map (apimachinery "matches all"). For a *scope* clause that is a
+			// silent namespace-wide over-grant, so collapse it back to the nil
+			// selector — the engine then matches nothing (fail-safe, DESIGN §5).
+			if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
+				sel = closure.LabelSelector{}
+			}
+			clause.Selector = sel
+		}
+		out = append(out, clause)
 	}
 	return out, nil
 }

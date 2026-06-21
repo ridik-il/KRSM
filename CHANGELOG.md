@@ -7,6 +7,19 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Selector scope dimension (ADR-0008, ADR-0005 follow-on): a task's authorised scope
+  can now express *the pods matching a label selector*, not just flat identities.
+  `Safe`'s scope clauses are dimension-typed — `dim: resource` (the v0.1/v0.2 flat
+  identity clause, unchanged) and the new `dim: selector`, which matches a closure
+  member against its **live** labels via the existing `closure.LabelSelector`
+  (`matchLabels` + `matchExpressions`, absence-sensitive operators). This closes the
+  `C ⊆ scope(T)` precision asymmetry: a precise closure (ADR-0005) tested against an
+  imprecise scope no longer yields avoidable false Blocks. Selector scope matching is
+  state-dependent and fails safe — an empty/nil selector clause matches nothing, and a
+  candidate whose labels cannot be resolved escapes (fail-closed, DESIGN §5). New
+  golden scenario `20-scope-selector-precision` proves a Block→Allow flip that is only
+  expressible with the selector dimension; the `krsm check` SCOPE line renders a
+  selector clause readably (e.g. `Pod/prod/{app In [web]}`).
 - Release automation (ADR-0006): `.goreleaser.yaml` + `.github/workflows/release.yml` —
   a tag (`v*`) builds multi-OS/arch `krsm` binaries with SHA-256 checksums, release notes
   extracted from this changelog, a syft SBOM per archive, and keyless cosign signing.
@@ -18,6 +31,12 @@ All notable changes to this project are documented here. The format follows
 - Repo hygiene: Dependabot (gomod + github-actions), `CODEOWNERS`, and a pull-request template.
 
 ### Changed
+- **Breaking (`closure` SDK, pre-1.0):** `ScopeRef{GVK, Namespace, Name}` is replaced by
+  `ScopeClause{Dim, GVK, Namespace, Name, Selector}` with a `ScopeDim` tag
+  (`DimResource` / `DimSelector`); `Safe`'s `scope` parameter retypes
+  `[]ScopeRef` → `[]ScopeClause`. An empty `Dim` is read as `DimResource`, so existing
+  flat scopes behave identically. `ScopeRef` is removed (no deprecated alias) — the same
+  no-external-importers rationale as ADR-0005's `Object.Selector` retype (ADR-0008).
 - `make check` now mirrors CI (adds `lint` + `staticcheck`); CONTRIBUTING updated to match.
 
 ## [0.2.0] - 2026-06-20

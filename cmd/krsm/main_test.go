@@ -15,6 +15,28 @@ func scenarioDir(name string) string {
 	return filepath.Join("..", "..", "closure", "testdata", "scenarios", name)
 }
 
+// TestCheckSelectorScenarioAllows: the selector-scope proof scenario (20) reports
+// ALLOW (exit 0, no errBlocked) and renders the selector clause in the SCOPE line
+// between braces (e.g. Pod/prod/{app In [web]}), while the resource clause still
+// renders as Kind/ns/name.
+func TestCheckSelectorScenarioAllows(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", scenarioDir("20-scope-selector-precision")}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("run(check, selector scenario) = %v, want nil (ALLOW, exit 0)", err)
+	}
+	stdout := out.String()
+	for _, want := range []string{
+		"ALLOW",
+		"Deployment/prod/frontend", // resource clause renders unchanged
+		"Pod/prod/{app In [web]}",  // selector clause renders readably
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q; got:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestRunVersion(t *testing.T) {
 	for _, arg := range []string{"version", "--version", "-v"} {
 		var out, errOut bytes.Buffer
@@ -185,11 +207,11 @@ func TestCheckExtraArgIsUsageError(t *testing.T) {
 // TestScopeStrIncludesGroup: a scope clause with an API group renders as
 // Kind.group so clauses differing only by group are unambiguous; core stays bare.
 func TestScopeStrIncludesGroup(t *testing.T) {
-	grouped := closure.ScopeRef{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web"}
+	grouped := closure.ScopeClause{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web"}
 	if got, want := scopeStr(grouped), "Deployment.apps/prod/web"; got != want {
 		t.Errorf("scopeStr(grouped) = %q, want %q", got, want)
 	}
-	core := closure.ScopeRef{GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespace: "prod", Name: "web-1"}
+	core := closure.ScopeClause{GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespace: "prod", Name: "web-1"}
 	if got, want := scopeStr(core), "Pod/prod/web-1"; got != want {
 		t.Errorf("scopeStr(core) = %q, want %q", got, want)
 	}

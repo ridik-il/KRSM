@@ -1,0 +1,15 @@
+# The task authorised restarting the frontend Deployment AND the app=web pods it
+# disrupts. The Deployment is a flat-identity (resource) clause; the pods are a
+# selector clause — `app In [web]` — which covers exactly frontend-aaa and
+# worker-bbb (both app=web) and excludes db-ccc (app=db). A resource clause cannot
+# express this without a `*` glob that would over-grant db-ccc.
+scope:
+  - dim: resource
+    kind: Deployment
+    namespace: prod
+    name: frontend
+  - dim: selector
+    kind: Pod
+    namespace: prod
+    matchExpressions:
+      - {key: app, operator: In, values: [web]}

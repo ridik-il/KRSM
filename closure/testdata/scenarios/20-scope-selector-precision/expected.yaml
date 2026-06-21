@@ -1,0 +1,13 @@
+# The selector-dim scope clause covers exactly the two app=web pods the Disruptive
+# restart binds (frontend-aaa, worker-bbb); the resource clause covers the
+# Deployment. Nothing escapes → Allow. db-ccc (app=db) is neither selected by the
+# workload nor in scope, so it never enters the picture. Treated as resource-only
+# (the pre-v0.3 loader), the selector clause would not parse and both pods would
+# escape → a wrongly-issued Block; the selector dimension is what flips it to Allow.
+verdict: Allow
+closure:
+  - {kind: Deployment, namespace: prod, name: frontend}
+  - {kind: Pod, namespace: prod, name: frontend-aaa}
+  - {kind: Pod, namespace: prod, name: worker-bbb}
+escaping: []
+external: []
