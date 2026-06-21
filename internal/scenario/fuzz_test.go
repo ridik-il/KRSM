@@ -33,7 +33,7 @@ func FuzzParseManifests(f *testing.F) {
 	f.Add([]byte("---\n"))
 	f.Add([]byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n"))
 
-	f.Fuzz(func(t *testing.T, raw []byte) {
+	f.Fuzz(func(_ *testing.T, raw []byte) {
 		// Any (result, error) pair is acceptable; a panic is not. Each parser
 		// sees the same arbitrary bytes — they share the document-splitting and
 		// YAML-to-JSON path, so all three must tolerate malformed input.
