@@ -80,6 +80,22 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
+// TestParseScopeRejectsUnknownDim: a scope clause whose `dim` is not one of
+// {"", resource, selector} (a typo, or a not-yet-implemented dimension) must fail
+// to load loudly rather than be silently coerced into a resource grant. parseScope
+// runs ScopeClause.Validate per clause, so a bogus dim surfaces as an error.
+func TestParseScopeRejectsUnknownDim(t *testing.T) {
+	raw := []byte("scope:\n" +
+		"  - dim: bogus\n" +
+		"    kind: Pod\n" +
+		"    namespace: prod\n" +
+		"    name: web-1\n")
+
+	if _, err := parseScope(raw); err == nil {
+		t.Fatal("parseScope(dim: bogus) = nil error, want rejection of the unknown dimension")
+	}
+}
+
 // TestParseScopeSelectorClause: a scope clause with `dim: selector` and
 // matchExpressions parses into a DimSelector ScopeClause carrying the populated
 // LabelSelector (gated by the clause's GVK/namespace), built by the same selector

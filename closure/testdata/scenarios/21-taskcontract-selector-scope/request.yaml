@@ -1,0 +1,18 @@
+# Restart the frontend Deployment — a Disruptive verb that re-rolls every pod the
+# workload selects (all app=web pods in prod, ownership-independent).
+#
+# The target is fully GVK-qualified (group: apps, version: v1) — unlike scenario 20,
+# whose scope.yaml resource clause omits group/version. The DESIGN §6 TaskContract
+# wire form spells out the gvk (`{group: apps, version: v1, kind: Deployment}`), and
+# the engine seeds the closure from the action target's own ref (closure.Closure),
+# so the target must carry the same group/version the compiled resource clause gates
+# on, or the gate (closure.gates: Group/Version checked when specified) would reject
+# the bare-GVK target and wrongly Block. Fully-qualifying the request is also the
+# realistic shape; the verdict/closure are otherwise identical to scenario 20.
+verb: restart
+target:
+  group: apps
+  version: v1
+  kind: Deployment
+  namespace: prod
+  name: frontend

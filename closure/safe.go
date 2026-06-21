@@ -78,20 +78,32 @@ type labelsOf func(Ref) (map[string]string, bool)
 // namespace. A DimResource clause then matches the resource name against the
 // clause's name pattern (glob via path.Match) — unchanged from v0.1. A DimSelector
 // clause instead matches r's live labels against the clause's selector.
+//
+// The dimension switch is explicit and fail-closed: a clause whose Dim is neither
+// resource nor selector (a typo, or a not-yet-implemented dimension) covers
+// NOTHING — it is skipped, never coerced into a resource grant. dimOf maps an empty
+// Dim to DimResource so dim-less v0.1/v0.2 clauses still match as resource; any
+// other unrecognised Dim falls through to the default skip. The loader
+// (parseScope/Validate) rejects unknown dimensions at load time, so this engine
+// branch is a defence-in-depth guard against a clause constructed in code.
 func matchScope(r Ref, scope []ScopeClause, labels labelsOf) bool {
 	for _, sc := range scope {
 		if !gates(sc, r) {
 			continue
 		}
 		switch dimOf(sc) {
+		case DimResource:
+			if ok, _ := path.Match(sc.Name, r.Name); ok {
+				return true
+			}
 		case DimSelector:
 			if matchSelectorClause(sc, r, labels) {
 				return true
 			}
-		default: // DimResource (and empty Dim, for back-compat)
-			if ok, _ := path.Match(sc.Name, r.Name); ok {
-				return true
-			}
+		default:
+			// Unknown dimension (not resource/selector): grant nothing (fail-closed).
+			// Fall through to the next clause without matching — never coerced into a
+			// resource grant. The loader rejects this at load; this is defence-in-depth.
 		}
 	}
 	return false

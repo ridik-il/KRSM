@@ -86,3 +86,19 @@ make `matchScope` state-dependent through a narrow label lookup:
   `namespace`, `reference`); and inexpressible-scope gap signalling (e.g. set-difference "all
   `app=web` except canaries"). This slice introduces the discriminated clause with the two
   dimensions it needs now, on the design's committed trajectory.
+- **Unknown dimensions fail closed (refinement).** An earlier cut let `matchScope`'s
+  switch fall through `default` into the resource branch, so an unrecognised `Dim` (a typo
+  like `Selector`, or a not-yet-implemented `ownership`) was silently matched as a resource
+  clause — for a safety control, a silent over-grant. The switch is now explicit
+  (`case DimResource` / `case DimSelector` / `default → skip`): an unknown dimension covers
+  **nothing** in the engine, and the loader (`parseScope`) **rejects** any clause whose `dim`
+  is outside `{"", resource, selector}` so a typo'd scenario fails to load loudly. An empty
+  `Dim` still reads as `DimResource`. This is defence-in-depth across the two layers (load
+  and match), in keeping with the fail-closed posture above.
+- **Safe constructors + `Validate` (refinement).** `closure.ResourceClause` and
+  `closure.SelectorClause` build the two dimensions with their fields guaranteed consistent,
+  and `ScopeClause.Validate()` checks structural consistency (known `Dim`; a resource clause
+  carries no selector; a selector clause carries no name; an *empty* selector stays valid as a
+  deliberate match-nothing fail-safe). `parseScope` calls `Validate` per clause, which is also
+  the load-time guard for the unknown-dimension rejection above. Stdlib-only; `internal/archguard`
+  still passes.

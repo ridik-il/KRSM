@@ -7,6 +7,21 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Public `scope` package — `TaskContract`→`ScopePredicate` compiler (ADR-0009,
+  realising ADR-0003 / DESIGN §6–§7). A new stdlib-only, embeddable package defines a
+  Go `TaskContract` (the declarative, agent-referenced authorised scope) and
+  `Compile(TaskContract) (ScopePredicate, error)`, which lowers each declared
+  allow-clause to a dimension-typed `closure.ScopeClause` (the `resource` and
+  `selector` dims) and carries the (unenforced) `maxSeverity`. `Compile` takes the
+  struct, not YAML — parsing the wire form lives in the loader, so embedders pull in
+  no YAML dependency. It **fails closed**: a wrong `apiVersion`/`kind`, an unsupported
+  scope dimension (e.g. a not-yet-built `ownership`), a structurally invalid clause
+  (`closure.ScopeClause.Validate`), or an unknown `maxSeverity` is a hard error rather
+  than a silently narrowed (allow-nothing) or partial scope. The loader prefers a
+  scenario's `taskcontract.yaml` (compiling it) over the legacy `scope.yaml` path;
+  new golden scenario `21-taskcontract-selector-scope` proves the compiler path
+  end-to-end (Allow). `closure.Safe`'s signature is unchanged; `archguard`'s new
+  `TestScopeIsStdlibOnly` guards the package's stdlib-only boundary.
 - Selector scope dimension (ADR-0008, ADR-0005 follow-on): a task's authorised scope
   can now express *the pods matching a label selector*, not just flat identities.
   `Safe`'s scope clauses are dimension-typed — `dim: resource` (the v0.1/v0.2 flat
@@ -20,6 +35,18 @@ All notable changes to this project are documented here. The format follows
   golden scenario `20-scope-selector-precision` proves a Block→Allow flip that is only
   expressible with the selector dimension; the `krsm check` SCOPE line renders a
   selector clause readably (e.g. `Pod/prod/{app In [web]}`).
+- `closure.ResourceClause(gvk, namespace, name)` and
+  `closure.SelectorClause(gvk, namespace, selector)` safe constructors, plus
+  `ScopeClause.Validate()` — structural-consistency checks (Dim must be `""`,
+  `resource`, or `selector`; a resource clause must carry no selector; a selector
+  clause must carry no name). `parseScope` runs `Validate` per clause, so a malformed
+  scope fails to load loudly instead of misbehaving.
+- **Fail-closed unknown scope dimensions:** a scope clause whose `dim` is not one of
+  `{"", resource, selector}` (a typo, or a not-yet-implemented dimension like
+  `ownership`) is now **rejected at load** (`parseScope` → error) and, as
+  defence-in-depth, **matches nothing in the engine** (`matchScope`'s dimension switch
+  is explicit — an unknown dim is skipped, never coerced into a resource grant). An
+  empty `dim` still reads as `resource` for v0.1/v0.2 back-compat.
 - Release automation (ADR-0006): `.goreleaser.yaml` + `.github/workflows/release.yml` —
   a tag (`v*`) builds multi-OS/arch `krsm` binaries with SHA-256 checksums, release notes
   extracted from this changelog, a syft SBOM per archive, and keyless cosign signing.

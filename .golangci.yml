@@ -17,6 +17,16 @@ linters:
       - linters:
           - errcheck
         path: _test\.go
+      # scope.ScopePredicate is the authoritative public API name (DESIGN §7,
+      # ADR-0009): the compiled TaskContract that callers pass to closure.Safe.
+      # revive's exported-stutter heuristic flags scope.ScopePredicate, but
+      # "predicate" is the domain noun and renaming to scope.Predicate would
+      # diverge from the design and the ADR. Narrowly silence that one rule for
+      # this identifier rather than weakening revive elsewhere.
+      - linters:
+          - revive
+        path: scope/scope\.go
+        text: ScopePredicate
     paths:
       - third_party$
       - builtin$

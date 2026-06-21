@@ -74,6 +74,74 @@ func TestResourceDimGlobAndEmptyDim(t *testing.T) {
 	}
 }
 
+// TestScopeClauseValidate checks structural consistency only: Dim must be one of
+// {"", DimResource, DimSelector}; a resource clause must not carry a Selector; a
+// selector clause must not carry a Name. An empty selector is deliberately valid
+// (match-nothing is a fail-safe, not a malformed clause).
+func TestScopeClauseValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		clause  ScopeClause
+		wantErr bool
+	}{
+		{"valid resource", ScopeClause{Dim: DimResource, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1"}, false},
+		{"valid empty dim", ScopeClause{GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1"}, false},
+		{"valid selector", ScopeClause{Dim: DimSelector, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Selector: LabelSelector{MatchLabels: map[string]string{"app": "web"}}}, false},
+		{"valid selector empty (match-nothing)", ScopeClause{Dim: DimSelector, GVK: GVK{Kind: "Pod"}, Namespace: "prod"}, false},
+		{"unknown dim", ScopeClause{Dim: "ownership", GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1"}, true},
+		{"resource with selector", ScopeClause{Dim: DimResource, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1", Selector: LabelSelector{MatchLabels: map[string]string{"app": "web"}}}, true},
+		{"selector with name", ScopeClause{Dim: DimSelector, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1", Selector: LabelSelector{MatchLabels: map[string]string{"app": "web"}}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.clause.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() err = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestConstructorsHonoredBySafe: the safe constructors build clauses Safe respects
+// — a SelectorClause admits a matching member, a ResourceClause admits by name —
+// observed through Decision (no unexported access).
+func TestConstructorsHonoredBySafe(t *testing.T) {
+	t.Run("ResourceClause admits by name", func(t *testing.T) {
+		pod := podRef("web-1", map[string]string{"app": "web"})
+		scope := []ScopeClause{ResourceClause(GVK{Kind: "Pod"}, "prod", "web-1")}
+		if !admits(t, pod, scope) {
+			t.Error("ResourceClause(Pod/prod/web-1) did not admit web-1")
+		}
+	})
+	t.Run("SelectorClause admits a matching member", func(t *testing.T) {
+		pod := podRef("web-1", map[string]string{"app": "web"})
+		scope := []ScopeClause{SelectorClause(GVK{Kind: "Pod"}, "prod", LabelSelector{MatchLabels: map[string]string{"app": "web"}})}
+		if !admits(t, pod, scope) {
+			t.Error("SelectorClause(Pod/prod, app=web) did not admit a matching pod")
+		}
+	})
+}
+
+// TestUnknownDimMatchesNothing: a clause with an unrecognised Dim (a typo like
+// "Selector", or a not-yet-implemented dimension like "ownership") must cover
+// NOTHING — even when, read as a resource clause, its Name would match the member
+// exactly. For a fail-closed safety control an unknown dimension must never be
+// silently coerced into a resource grant; the member escapes (Block).
+func TestUnknownDimMatchesNothing(t *testing.T) {
+	objs := []Object{podRef("web-1", map[string]string{"app": "web"})}
+	s := NewScanState(objs)
+	a := Action{Verb: Restart, Target: objs[0].Ref, Cascade: false}
+
+	// As a resource clause this Name ("web-1") would match the only closure member;
+	// but the unknown dim must mean the clause grants nothing.
+	scope := []ScopeClause{{Dim: "ownership", GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1"}}
+
+	d := Safe(s, a, scope)
+	if d.Verdict != Block || len(d.Escaping) != 1 {
+		t.Fatalf("verdict = %s escaping = %v, want Block with the member escaping (unknown dim grants nothing)", d.Verdict, escapedNames(d))
+	}
+}
+
 // selectorScope is a single DimSelector clause gating Pods in prod by sel.
 func selectorScope(sel LabelSelector) []ScopeClause {
 	return []ScopeClause{{Dim: DimSelector, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Selector: sel}}

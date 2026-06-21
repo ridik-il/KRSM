@@ -5,6 +5,13 @@
 # `frontend-aaa` (the workload's own pod) AND `worker-bbb`. `db-ccc` (app=db) is the
 # decoy — not selected.
 #
+# This scenario proves the TaskContract→ScopePredicate compiler path: the cluster
+# and request mirror scenario 20 (selector-precision), but scope is NOT supplied by
+# a hand-written scope.yaml. Instead a taskcontract.yaml (DESIGN §6 wire form) is
+# parsed by the loader, compiled by scope.Compile into the same dimension-typed
+# closure.ScopeClause set, and handed to closure.Safe. Scenario 20 keeps golden
+# coverage of the scope.yaml path; this scenario adds the compiler proof additively.
+#
 # MODEL-FIDELITY CAVEAT (read before the comments below mislead you): a real
 # `kubectl rollout restart Deployment/frontend` cycles ONLY frontend's own pods, so
 # in a real cluster `worker-bbb` would NOT be disrupted. `worker-bbb` is in the
@@ -13,20 +20,12 @@
 # deliberate, sound CONSERVATIVE over-approximation, not literal restart semantics.
 # The two-workloads-sharing-`app=web` setup is a CONTRIVED overlapping-selector
 # premise engineered to yield a cross-name-stem pod set; it is the construction, not
-# a claim about how restart behaves. The SELECTOR-SCOPE feature under test is correct
-# regardless of this modelling choice — it is about whether scope can express
-# "the app=web pods" precisely.
-#
-# This is the scope counterpart to ADR-0005's closure-side fix: the closure binds
-# the two app=web pods precisely (per the conservative model above), but a
-# flat-identity scope cannot cover both `frontend-aaa` and `worker-bbb` without a
-# `*` glob — which would also grant `db-ccc`, defeating precision. Only a
-# selector-dim scope clause (`app In [web]`) covers exactly the two pods and nothing
-# else → Allow. Without it (scope treated as resource-only) those pods escape → a
-# wrongly-issued Block.
+# a claim about how restart behaves. The selector-scope compiler under test is
+# correct regardless of this modelling choice — it is about whether a TaskContract
+# can express "the app=web pods" precisely and compile it to a ScopePredicate.
 #
 # No Service/PDB/NetworkPolicy: keeps the closure to the Deployment + its selected
-# pods, so the proof is about scope precision and nothing else.
+# pods, so the proof is about the compiled scope precision and nothing else.
 ---
 apiVersion: apps/v1
 kind: Deployment
