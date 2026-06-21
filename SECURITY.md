@@ -2,17 +2,34 @@
 
 KRSM is a security control for Kubernetes clusters, so we take its own security seriously.
 
+## Supported versions
+
+KRSM is pre-1.0. Security fixes land on `main` and in the latest tagged release;
+older tags are not back-patched.
+
 ## Reporting a vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, report privately via [GitHub Security Advisories](../../security/advisories/new) (preferred) or by email to the maintainer. Include:
+Report privately through one of these channels:
+
+- **Preferred:** open a private advisory at <https://github.com/ridik-il/KRSM/security/advisories/new>.
+- **Email:** ilyasov.2003@gmail.com.
+
+Include:
 
 - a description of the issue and its impact,
 - steps to reproduce (a minimal scenario is ideal),
 - affected version/commit.
 
-We aim to acknowledge reports promptly and to coordinate a fix and disclosure timeline with you.
+## Disclosure timeline
+
+We follow coordinated disclosure:
+
+- **Within 3 days** — acknowledge your report.
+- **Within 14 days** — confirm the issue and share an assessment and a fix plan.
+- **Within 90 days** — release a fix and publish an advisory, crediting you unless
+  you ask otherwise. We will agree any deviation from this window with you.
 
 ## Scope and threat model (early)
 

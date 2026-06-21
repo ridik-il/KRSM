@@ -1,10 +1,13 @@
-# Default owner for everything in the repo.
-*                       @ridik-il
+# "Code owner" here is a review rule (required/auto-requested reviewer for the
+# matching paths), not project governance. The project OWNER is @ridik-il — the
+# repo admin. @justem1l is a maintainer who helps review and build the code; he
+# has no ownership over the CI/release/supply-chain config below.
 
-# The embeddable, stdlib-only SDK — guard its dependency-free purity especially.
-/closure/               @ridik-il
-/scope/                 @ridik-il
+# Application code: either maintainer may review.
+*                       @ridik-il @justem1l
+/closure/               @ridik-il @justem1l
+/scope/                 @ridik-il @justem1l
 
-# CI / release / supply-chain config.
+# CI / release / supply-chain config — owned by the project owner alone.
 /.github/               @ridik-il
 /.goreleaser.yaml       @ridik-il

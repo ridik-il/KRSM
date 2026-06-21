@@ -28,6 +28,15 @@ Toolchain: Go per `go.mod` (the CI source of truth), `gofmt -s`, `golangci-lint`
 3. Update docs/ADRs alongside the code.
 4. Ensure `make check` and CI are green.
 
+## Maintainers
+
+- Riyad Ilyasov ([@ridik-il](https://github.com/ridik-il)) — project owner
+- Emil Hasanov ([@justem1l](https://github.com/justem1l)) — maintainer
+
+Maintainers review incoming PRs and either may approve an application-code change
+(see [.github/CODEOWNERS](.github/CODEOWNERS)). The CI/release/supply-chain config
+is owned by the project owner.
+
 ## Reporting security issues
 
 Do **not** open a public issue for vulnerabilities — see [SECURITY.md](SECURITY.md).
