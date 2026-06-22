@@ -106,12 +106,80 @@ type Action struct {
 	New     *Object
 }
 
-// ScopeRef is one clause of a task's authorised scope (v0.1: flat identity).
-// Name may be a glob ("*"); Group/Version are optional and ignored when empty.
-type ScopeRef struct {
+// ScopeDim is the relation dimension a scope clause authorises along (DESIGN §6).
+type ScopeDim string
+
+const (
+	DimResource ScopeDim = "resource" // flat identity: GVK + namespace + name(glob)
+	DimSelector ScopeDim = "selector" // pods/objects whose labels satisfy Selector
+)
+
+// ScopeClause is one allow-clause of a task's authorised scope. Exactly one
+// dimension's fields are meaningful, chosen by Dim. An empty Dim is read as
+// DimResource for backward compatibility with v0.1/v0.2 flat scopes.
+//
+// DimResource is the v0.1 flat-identity clause: Name may be a glob ("*"), and
+// Group/Version are optional (ignored when empty). DimSelector is state-dependent:
+// it matches a candidate whose live labels satisfy Selector, gated by the same
+// GVK/Namespace fields (see matchScope).
+type ScopeClause struct {
+	Dim       ScopeDim
 	GVK       GVK
 	Namespace string
-	Name      string
+	Name      string        // DimResource only: identity or path.Match glob
+	Selector  LabelSelector // DimSelector only: matchLabels + matchExpressions
+}
+
+// ResourceClause builds a DimResource scope clause: a flat-identity allow-clause
+// gating on GVK + namespace and matching the resource name (exact or path.Match
+// glob). It is the safe constructor for the v0.1 identity dimension — use it (and
+// SelectorClause) rather than a struct literal so the Dim/field combination is
+// always internally consistent (see ScopeClause.Validate).
+func ResourceClause(gvk GVK, namespace, name string) ScopeClause {
+	return ScopeClause{Dim: DimResource, GVK: gvk, Namespace: namespace, Name: name}
+}
+
+// SelectorClause builds a DimSelector scope clause: a state-dependent allow-clause
+// gating on GVK + namespace and matching a candidate whose live labels satisfy
+// selector. An empty selector deliberately matches nothing (a fail-safe, not an
+// error); see matchScope. It is the safe constructor for the selector dimension.
+func SelectorClause(gvk GVK, namespace string, selector LabelSelector) ScopeClause {
+	return ScopeClause{Dim: DimSelector, GVK: gvk, Namespace: namespace, Selector: selector}
+}
+
+// hasSelector reports whether the clause carries any selector requirement.
+func (c ScopeClause) hasSelector() bool {
+	return len(c.Selector.MatchLabels) > 0 || len(c.Selector.MatchExpressions) > 0
+}
+
+// Validate checks a clause's structural consistency — that its Dim and fields form
+// a coherent combination — independent of any cluster state. It is the load-time
+// guard (parseScope calls it per clause) that turns a malformed or unknown-dimension
+// clause into a loud failure instead of silent misbehaviour:
+//
+//   - Dim must be one of "", DimResource, or DimSelector. An empty Dim is allowed
+//     (read as DimResource for v0.1/v0.2 back-compat); any other value (a typo, or a
+//     not-yet-implemented dimension) is rejected — fail-closed, not coerced.
+//   - A resource clause must NOT carry a Selector (the selector would be silently
+//     ignored, masking a clause that meant to be a selector clause).
+//   - A selector clause must NOT carry a Name (the Name would be silently ignored).
+//
+// An empty selector on a selector clause is NOT an error: an empty authorisation
+// selector is a deliberate match-nothing fail-safe (DESIGN §6), kept loadable.
+func (c ScopeClause) Validate() error {
+	switch c.Dim {
+	case "", DimResource:
+		if c.hasSelector() {
+			return fmt.Errorf("scope clause %s/%s/%s: resource dimension must not carry a selector", c.GVK.Kind, c.Namespace, c.Name)
+		}
+	case DimSelector:
+		if c.Name != "" {
+			return fmt.Errorf("scope clause %s/%s: selector dimension must not carry a name (got %q)", c.GVK.Kind, c.Namespace, c.Name)
+		}
+	default:
+		return fmt.Errorf("scope clause %s/%s: unknown scope dimension %q (want %q, %q, or empty)", c.GVK.Kind, c.Namespace, c.Dim, DimResource, DimSelector)
+	}
+	return nil
 }
 
 // Verdict is the allow/deny decision, ordered Allow < Warn < Block.

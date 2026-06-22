@@ -1,0 +1,26 @@
+# The authorised scope as a TaskContract (DESIGN §6, ADR-0003) — the user-facing
+# contract the agent references, not a hand-written engine scope.yaml. The loader
+# parses this into a scope.TaskContract and scope.Compile lowers it to a
+# ScopePredicate whose clauses are exactly what closure.Safe consumes:
+#   - a `resource` clause for the frontend Deployment (flat identity), and
+#   - a `selector` clause `app In [web]` covering exactly frontend-aaa and worker-bbb
+#     (both app=web) and excluding db-ccc (app=db) — a precision a resource `*` glob
+#     could not express without over-granting db-ccc.
+# maxSeverity is carried on the predicate (DESIGN §6) but not enforced this slice.
+apiVersion: krsm.io/v1
+kind: TaskContract
+metadata:
+  name: restart-frontend-web-pods
+  namespace: prod
+spec:
+  allow:
+    - dim: resource
+      gvk: {group: apps, version: v1, kind: Deployment}
+      namespace: prod
+      name: frontend
+    - dim: selector
+      gvk: {version: v1, kind: Pod}
+      namespace: prod
+      matchExpressions:
+        - {key: app, operator: In, values: [web]}
+  maxSeverity: high

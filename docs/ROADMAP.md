@@ -36,23 +36,57 @@ Make scope declarable beyond flat lists.
 
 **Done when:** a `TaskContract` YAML compiles and correctly classifies the corpus scenarios, **including** a scenario that is wrongly Blocked today purely because scope cannot express the selector the closure already binds.
 
-## v0.4 — Live-cluster reads
+## v0.4 — Live-cluster reads + derived default scope
 
-Run closure against a real cluster (read-only) — the motivating milestone.
+Run closure against a real cluster (read-only) — the motivating milestone — and make
+it **useful with zero contracts** (ADR-0011: progressive, derived scope).
 
 - An informer-backed state provider (client-go) builds the four indexes incrementally.
 - The CLI can snapshot a live `kind` cluster and compute closure for a given action.
+- **Derived default scope (Level 0, ADR-0011).** With no annotation and no contract,
+  KRSM synthesizes a conservative scope from the action's own target — the *ownership
+  tree* of the target, **alone**. Not a bare namespace boundary (which would Allow the
+  flagship intra-namespace cascade `01`), and not OR'd with a namespace clause (under
+  union semantics that would re-admit the same collateral and defeat the default; it is
+  redundant anyway, since anything cross-namespace is already outside the tree). This is
+  the "install and immediately useful" cut. Requires the `ownership` scope dimension and
+  a scope *synthesizer* above `scope.Compile`; the `namespace` dimension is built
+  alongside (deferred from v0.3, ADR-0008/0009) for explicit/`template` use.
 
-**Done when:** on a `kind` cluster, `krsm check` reports the correct closure for a real action, with no manual snapshot.
+**Done when:** on a `kind` cluster, `krsm check` reports the correct closure for a real
+action with no manual snapshot, **and** flags an escaping action under the derived
+default scope with no contract written.
 
-## v0.5 — The admission webhook
+## v0.5 — The admission webhook (audit-first)
 
-The actual product: deny escaping actions before they persist.
+The actual product: flag/deny escaping actions before they persist — adoption-friendly
+by default (ADR-0011).
 
-- A `ValidatingWebhook` server; `TaskContract` scope channel; fail-closed on unknown closure.
-- `namespaceSelector`/`objectSelector` scoping to agent-originated requests.
+- A `ValidatingWebhook` server; `namespaceSelector`/`objectSelector` scoping to
+  agent-originated requests; fail-closed on unknown closure.
+- **Audit-first verdict mode (ADR-0011).** Install default is **audit** (a derived-scope
+  escape is a `Warn`, never a deny); **enforce** (`Block`) is opt-in — the Falco/Kyverno
+  lesson, so a day-0 false positive does not get KRSM uninstalled.
+- **Progressive scope channel.** Level 1 (`krsm.io/target` annotation → ownership-tree
+  from a declared target) and the full `TaskContract` (Level 3, ADR-0009) both supply
+  scope; provenance (`derived` | `annotation` | `template` | `contract`) is reported in
+  the verdict. A cross-boundary allowlist exempts legitimate shared-resource references
+  from *derived* modes.
 
-**Done when:** on `kind`, an agent-stamped escaping `delete` is **denied pre-persistence** and an in-scope one is **admitted**, end-to-end.
+**Done when:** on `kind`, an agent-stamped escaping `delete` is **flagged in audit mode
+and denied pre-persistence in enforce mode**, and an in-scope one is **admitted** — both
+with a *derived* scope (no contract) and with a full contract, end-to-end.
+
+## v0.6 — Scope templates (Level 2)
+
+Lower the friction between "derived default" and "full custom" (ADR-0011).
+
+- Built-in `spec.template`s on a `TaskContract` — `ownership-tree`, `namespace-contained`,
+  `single-resource`, `selector-bound` — each a one-liner the synthesizer expands to
+  clauses. No engine change (sugar over the compiler).
+
+**Done when:** a one-line templated `TaskContract` classifies the corpus scenarios
+identically to the equivalent hand-written multi-dimension contract.
 
 ## v1.0 — Embeddable + polished
 

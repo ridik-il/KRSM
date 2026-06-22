@@ -79,3 +79,64 @@ func TestLoadErrors(t *testing.T) {
 		t.Error("Load(malformed yaml) = nil error, want an error")
 	}
 }
+
+// TestParseScopeRejectsUnknownDim: a scope clause whose `dim` is not one of
+// {"", resource, selector} (a typo, or a not-yet-implemented dimension) must fail
+// to load loudly rather than be silently coerced into a resource grant. parseScope
+// runs ScopeClause.Validate per clause, so a bogus dim surfaces as an error.
+func TestParseScopeRejectsUnknownDim(t *testing.T) {
+	raw := []byte("scope:\n" +
+		"  - dim: bogus\n" +
+		"    kind: Pod\n" +
+		"    namespace: prod\n" +
+		"    name: web-1\n")
+
+	if _, err := parseScope(raw); err == nil {
+		t.Fatal("parseScope(dim: bogus) = nil error, want rejection of the unknown dimension")
+	}
+}
+
+// TestParseScopeSelectorClause: a scope clause with `dim: selector` and
+// matchExpressions parses into a DimSelector ScopeClause carrying the populated
+// LabelSelector (gated by the clause's GVK/namespace), built by the same selector
+// conversion the cluster loader uses. A dim-less clause stays DimResource.
+func TestParseScopeSelectorClause(t *testing.T) {
+	raw := []byte("scope:\n" +
+		"  - dim: resource\n" +
+		"    kind: Deployment\n" +
+		"    namespace: prod\n" +
+		"    name: frontend\n" +
+		"  - dim: selector\n" +
+		"    kind: Pod\n" +
+		"    namespace: prod\n" +
+		"    matchExpressions:\n" +
+		"      - {key: app, operator: In, values: [web]}\n")
+
+	got, err := parseScope(raw)
+	if err != nil {
+		t.Fatalf("parseScope: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d clauses, want 2", len(got))
+	}
+
+	res := got[0]
+	if res.Dim != closure.DimResource || res.Name != "frontend" || res.GVK.Kind != "Deployment" || res.Namespace != "prod" {
+		t.Errorf("resource clause = %+v, want DimResource Deployment/prod/frontend", res)
+	}
+
+	sel := got[1]
+	if sel.Dim != closure.DimSelector {
+		t.Errorf("clause[1].Dim = %q, want %q", sel.Dim, closure.DimSelector)
+	}
+	if sel.GVK.Kind != "Pod" || sel.Namespace != "prod" {
+		t.Errorf("selector clause gate = %s/%s, want Pod/prod", sel.GVK.Kind, sel.Namespace)
+	}
+	if len(sel.Selector.MatchExpressions) != 1 {
+		t.Fatalf("selector clause has %d expressions, want 1", len(sel.Selector.MatchExpressions))
+	}
+	req := sel.Selector.MatchExpressions[0]
+	if req.Key != "app" || req.Operator != closure.OpIn || len(req.Values) != 1 || req.Values[0] != "web" {
+		t.Errorf("requirement = %+v, want {app In [web]}", req)
+	}
+}

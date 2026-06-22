@@ -1,0 +1,7 @@
+# Restart the frontend Deployment — a Disruptive verb that re-rolls every pod the
+# workload selects (all app=web pods in prod, ownership-independent).
+verb: restart
+target:
+  kind: Deployment
+  namespace: prod
+  name: frontend

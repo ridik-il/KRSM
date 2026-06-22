@@ -9,6 +9,7 @@ package scenario
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,13 +19,14 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ridik-il/krsm/closure"
+	"github.com/ridik-il/krsm/scope"
 )
 
 // Scenario is a runnable check input: the three things closure.Safe needs.
 type Scenario struct {
 	State  closure.State
 	Action closure.Action
-	Scope  []closure.ScopeRef
+	Scope  []closure.ScopeClause
 }
 
 // Load reads cluster.yaml, request.yaml and scope.yaml from dir and builds a
@@ -57,11 +59,7 @@ func Load(dir string) (*Scenario, error) {
 		return nil, err
 	}
 
-	scopeRaw, err := read("scope.yaml")
-	if err != nil {
-		return nil, err
-	}
-	scope, err := parseScope(scopeRaw)
+	scope, err := loadScope(read)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +69,37 @@ func Load(dir string) (*Scenario, error) {
 		Action: action,
 		Scope:  scope,
 	}, nil
+}
+
+// loadScope resolves a scenario's authorised scope, preferring the user-facing
+// TaskContract. If taskcontract.yaml exists, it is parsed into a scope.TaskContract
+// and compiled (scope.Compile) into the dimension-typed clauses closure.Safe
+// consumes — the contract path. Otherwise it falls back to the legacy scope.yaml →
+// parseScope path, so every pre-v0.3 scenario loads unchanged. errors.Is(err,
+// os.ErrNotExist) distinguishes "no contract, use scope.yaml" from a real read
+// error, and survives any future error-wrapping in read.
+func loadScope(read func(string) ([]byte, error)) ([]closure.ScopeClause, error) {
+	contractRaw, err := read("taskcontract.yaml")
+	if err == nil {
+		tc, perr := parseTaskContract(contractRaw)
+		if perr != nil {
+			return nil, perr
+		}
+		pred, cerr := scope.Compile(tc)
+		if cerr != nil {
+			return nil, fmt.Errorf("compile taskcontract: %w", cerr)
+		}
+		return pred.Clauses, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	scopeRaw, err := read("scope.yaml")
+	if err != nil {
+		return nil, err
+	}
+	return parseScope(scopeRaw)
 }
 
 // --- raw manifest parsing ---------------------------------------------------
@@ -283,6 +312,24 @@ func matchLabels(raw json.RawMessage) (closure.LabelSelector, error) {
 	return sel, nil
 }
 
+// scopeSelectorFrom parses a scope/allow clause's selector, then collapses a
+// present-but-empty selector back to the nil selector. matchLabels turns `{}` into a
+// non-nil empty map (apimachinery "matches all"), but for an *authorisation* selector
+// that would be a silent namespace-wide over-grant; the engine treats the nil
+// selector as match-nothing (fail-safe, DESIGN §5). Both the legacy scope.yaml path
+// (parseScope) and the TaskContract path (parseTaskContract) need this identical
+// collapse, so it lives in one place.
+func scopeSelectorFrom(raw json.RawMessage) (closure.LabelSelector, error) {
+	sel, err := matchLabels(raw)
+	if err != nil {
+		return closure.LabelSelector{}, err
+	}
+	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
+		return closure.LabelSelector{}, nil
+	}
+	return sel, nil
+}
+
 func crossRefsFrom(ns string, spec rawSpec) []closure.CrossRef {
 	// Cross-refs come from the bare-Pod spec AND the workload pod template — a
 	// Deployment/StatefulSet mounts its config under spec.template.spec.
@@ -447,16 +494,124 @@ func parseAction(raw []byte) (closure.Action, error) {
 	return a, nil
 }
 
-func parseScope(raw []byte) ([]closure.ScopeRef, error) {
+// rawScopeClause is a dimension-typed scope clause. A clause with no `dim` (every
+// v0.1/v0.2 scope.yaml) loads as DimResource and matches by name exactly as before.
+// A `dim: selector` clause carries a `{matchLabels, matchExpressions}` selector,
+// built by the same matchLabels conversion the cluster loader uses for
+// Object.Selector — one selector parse path.
+type rawScopeClause struct {
+	Dim       string `json:"dim"`
+	Group     string `json:"group"`
+	Version   string `json:"version"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 	var rs struct {
-		Scope []rawRef `json:"scope"`
+		Scope []json.RawMessage `json:"scope"`
 	}
 	if err := yaml.Unmarshal(raw, &rs); err != nil {
 		return nil, fmt.Errorf("parse scope: %w", err)
 	}
-	out := make([]closure.ScopeRef, 0, len(rs.Scope))
-	for _, r := range rs.Scope {
-		out = append(out, closure.ScopeRef{GVK: closure.GVK{Group: r.Group, Version: r.Version, Kind: r.Kind}, Namespace: nsOf(r.Kind, r.Namespace), Name: r.Name})
+	out := make([]closure.ScopeClause, 0, len(rs.Scope))
+	for _, rawClause := range rs.Scope {
+		var rc rawScopeClause
+		if err := json.Unmarshal(rawClause, &rc); err != nil {
+			return nil, fmt.Errorf("parse scope clause: %w", err)
+		}
+		clause := closure.ScopeClause{
+			Dim:       closure.ScopeDim(rc.Dim),
+			GVK:       closure.GVK{Group: rc.Group, Version: rc.Version, Kind: rc.Kind},
+			Namespace: nsOf(rc.Kind, rc.Namespace),
+			Name:      rc.Name,
+		}
+		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
+			sel, err := scopeSelectorFrom(rawClause)
+			if err != nil {
+				return nil, fmt.Errorf("parse selector scope clause: %w", err)
+			}
+			clause.Selector = sel
+		}
+		// Validate structural consistency (and reject an unknown dimension) at load
+		// time so a typo'd or malformed scope.yaml fails loudly here rather than
+		// misbehaving in the engine (closure.ScopeClause.Validate; F1 fail-closed).
+		if err := clause.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid scope clause: %w", err)
+		}
+		out = append(out, clause)
 	}
 	return out, nil
+}
+
+// --- taskcontract -----------------------------------------------------------
+
+// rawTaskContract mirrors the TaskContract YAML wire form (DESIGN §6). Parsing it
+// here, in the dev/demo loader, keeps the public scope package YAML-free: scope only
+// ever sees the compiled struct. Each allow-clause's selector reuses the same
+// matchLabels conversion the cluster loader uses for Object.Selector — one selector
+// parse path — and namespace defaulting reuses nsOf, exactly as parseScope does.
+type rawTaskContract struct {
+	APIVersion string              `json:"apiVersion"`
+	Kind       string              `json:"kind"`
+	Metadata   rawTCMetadata       `json:"metadata"`
+	Spec       rawTaskContractSpec `json:"spec"`
+}
+
+type rawTCMetadata struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+type rawTaskContractSpec struct {
+	Allow       []json.RawMessage `json:"allow"`
+	MaxSeverity string            `json:"maxSeverity"`
+}
+
+// rawAllowClause is one spec.allow entry. The selector dim's `{matchLabels,
+// matchExpressions}` lives at the clause top level (mirroring scope.yaml), so the
+// whole raw clause is handed to matchLabels.
+type rawAllowClause struct {
+	Dim       string `json:"dim"`
+	GVK       rawRef `json:"gvk"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+// parseTaskContract maps the YAML wire form to a scope.TaskContract. It does not
+// validate the contract — that is scope.Compile's fail-closed job; the loader only
+// shapes the struct (resolving selectors and defaulting namespaces).
+func parseTaskContract(raw []byte) (scope.TaskContract, error) {
+	var rtc rawTaskContract
+	if err := yaml.Unmarshal(raw, &rtc); err != nil {
+		return scope.TaskContract{}, fmt.Errorf("parse taskcontract: %w", err)
+	}
+	allow := make([]scope.AllowClause, 0, len(rtc.Spec.Allow))
+	for _, rawClause := range rtc.Spec.Allow {
+		var rc rawAllowClause
+		if err := json.Unmarshal(rawClause, &rc); err != nil {
+			return scope.TaskContract{}, fmt.Errorf("parse allow clause: %w", err)
+		}
+		ac := scope.AllowClause{
+			Dim:       closure.ScopeDim(rc.Dim),
+			GVK:       closure.GVK{Group: rc.GVK.Group, Version: rc.GVK.Version, Kind: rc.GVK.Kind},
+			Namespace: nsOf(rc.GVK.Kind, rc.Namespace),
+			Name:      rc.Name,
+		}
+		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
+			sel, err := scopeSelectorFrom(rawClause)
+			if err != nil {
+				return scope.TaskContract{}, fmt.Errorf("parse selector allow clause: %w", err)
+			}
+			ac.Selector = sel
+		}
+		allow = append(allow, ac)
+	}
+	return scope.TaskContract{
+		APIVersion: rtc.APIVersion,
+		Kind:       rtc.Kind,
+		Metadata:   scope.Metadata{Name: rtc.Metadata.Name, Namespace: rtc.Metadata.Namespace},
+		Spec:       scope.Spec{Allow: allow, MaxSeverity: scope.Severity(rtc.Spec.MaxSeverity)},
+	}, nil
 }

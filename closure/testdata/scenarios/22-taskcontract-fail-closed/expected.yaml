@@ -1,0 +1,13 @@
+# NEGATIVE golden (fail-closed proof, ADR-0009). Unlike every other scenario, this
+# one asserts that Load() FAILS rather than asserting a verdict/closure: there is no
+# computable closure for a contract that never compiles, so verdict/closure/escaping/
+# external are deliberately absent.
+#
+# The `loadError` convention: when this key is non-empty, the golden runner asserts
+# that Load(dir) returns a non-nil error whose message CONTAINS this substring, then
+# skips all verdict/closure assertions (and the |C| ≤ |R| inventory bound, which is
+# undefined here). The substring is matched against the wrapped error chain:
+# loadScope wraps with "compile taskcontract: %w" and scope.Compile/compileClause
+# returns `unsupported scope dimension "ownership"`, so "unsupported scope dimension"
+# is a stable substring of the full message.
+loadError: "unsupported scope dimension"

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ridik-il/krsm/closure"
@@ -180,7 +181,7 @@ func joinRefs(refs []closure.Ref) string {
 	return strings.Join(parts, ", ")
 }
 
-func joinScope(scope []closure.ScopeRef) string {
+func joinScope(scope []closure.ScopeClause) string {
 	parts := make([]string, len(scope))
 	for i, s := range scope {
 		parts[i] = scopeStr(s)
@@ -188,13 +189,43 @@ func joinScope(scope []closure.ScopeRef) string {
 	return strings.Join(parts, ", ")
 }
 
-// scopeStr renders a scope clause as Kind/namespace/name, qualifying the kind with
-// its API group (Kubernetes "Kind.group" form) when set, so two clauses that
-// differ only by group are unambiguous.
-func scopeStr(s closure.ScopeRef) string {
+// scopeStr renders a scope clause as Kind/namespace/<member>, qualifying the kind
+// with its API group (Kubernetes "Kind.group" form) when set, so two clauses that
+// differ only by group are unambiguous. A resource clause's member is its
+// name/glob; a selector clause's member is its selector rendered between braces
+// (e.g. Pod/prod/{app In [web]}).
+func scopeStr(s closure.ScopeClause) string {
 	kind := s.GVK.Kind
 	if s.GVK.Group != "" {
 		kind += "." + s.GVK.Group
 	}
-	return fmt.Sprintf("%s/%s/%s", kind, s.Namespace, s.Name)
+	member := s.Name
+	if s.Dim == closure.DimSelector {
+		member = "{" + selectorStr(s.Selector) + "}"
+	}
+	return fmt.Sprintf("%s/%s/%s", kind, s.Namespace, member)
+}
+
+// selectorStr renders a LabelSelector readably for the SCOPE line: matchLabels as
+// `key=value` and each matchExpressions requirement as `key Op [values]`, joined by
+// commas (the AND the selector evaluates). Used only for human output.
+func selectorStr(sel closure.LabelSelector) string {
+	parts := make([]string, 0, len(sel.MatchLabels)+len(sel.MatchExpressions))
+	keys := make([]string, 0, len(sel.MatchLabels))
+	for k := range sel.MatchLabels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		parts = append(parts, k+"="+sel.MatchLabels[k])
+	}
+	for _, r := range sel.MatchExpressions {
+		switch r.Operator {
+		case closure.OpExists, closure.OpDoesNotExist:
+			parts = append(parts, fmt.Sprintf("%s %s", r.Key, r.Operator))
+		default:
+			parts = append(parts, fmt.Sprintf("%s %s %v", r.Key, r.Operator, r.Values))
+		}
+	}
+	return strings.Join(parts, ", ")
 }

@@ -1,0 +1,22 @@
+# The selector-dim scope clause covers exactly the two app=web pods the Disruptive
+# restart binds in the engine's model (frontend-aaa, worker-bbb); the resource
+# clause covers the Deployment. Nothing escapes → Allow. db-ccc (app=db) is neither
+# selected by the workload nor in scope, so it never enters the picture. Treated as
+# resource-only (the pre-v0.3 loader), the selector clause would not parse and both
+# pods would escape → a wrongly-issued Block; the selector dimension is what flips it
+# to Allow.
+#
+# Note on `worker-bbb` (see cluster.yaml's MODEL-FIDELITY CAVEAT): its presence in
+# the closure reflects the engine's conservative, ownership-independent selector
+# model of a disruptive verb — NOT literal `kubectl rollout restart` semantics, which
+# would touch only frontend's own pods. The overlapping `app=web` selector across two
+# workloads is the deliberate construction yielding this cross-name-stem pod set. The
+# selector-scope feature under test is correct regardless; only the comments changed,
+# the verdict/closure/escaping below are unchanged.
+verdict: Allow
+closure:
+  - {kind: Deployment, namespace: prod, name: frontend}
+  - {kind: Pod, namespace: prod, name: frontend-aaa}
+  - {kind: Pod, namespace: prod, name: worker-bbb}
+escaping: []
+external: []

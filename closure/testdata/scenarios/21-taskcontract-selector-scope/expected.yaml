@@ -1,0 +1,17 @@
+# The TaskContract compiled to a ScopePredicate whose selector clause covers exactly
+# the two app=web pods the Disruptive restart binds in the engine's model
+# (frontend-aaa, worker-bbb); the resource clause covers the Deployment. Nothing
+# escapes → Allow. db-ccc (app=db) is neither selected by the workload nor in scope,
+# so it never enters the picture. This is the same verdict scenario 20 pins via a
+# hand-written scope.yaml — proving the compiler path produces an identical scope.
+#
+# Note on `worker-bbb` (see cluster.yaml's MODEL-FIDELITY CAVEAT): its presence in
+# the closure reflects the engine's conservative, ownership-independent selector
+# model of a disruptive verb — NOT literal `kubectl rollout restart` semantics.
+verdict: Allow
+closure:
+  - {kind: Deployment, namespace: prod, name: frontend}
+  - {kind: Pod, namespace: prod, name: frontend-aaa}
+  - {kind: Pod, namespace: prod, name: worker-bbb}
+escaping: []
+external: []
