@@ -1,0 +1,11 @@
+# A valid, fully GVK-qualified request (group: apps, version: v1) — same shape as
+# scenario 21. parseAction must succeed so execution reaches loadScope, where the
+# uncompilable taskcontract.yaml below makes Load() fail closed. The verb/target are
+# otherwise immaterial: no verdict is ever computed for this scenario.
+verb: restart
+target:
+  group: apps
+  version: v1
+  kind: Deployment
+  namespace: prod
+  name: frontend

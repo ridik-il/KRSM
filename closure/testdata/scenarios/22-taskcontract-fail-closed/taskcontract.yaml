@@ -1,0 +1,25 @@
+# A well-formed-YAML but UN-COMPILABLE TaskContract — the negative artifact under
+# test. An author reaches for `dim: ownership`: a scope dimension that is valid
+# *future* syntax (DESIGN §6 names ownership/namespace/reference as later slices) but
+# is NOT yet built. parseTaskContract shapes this into a scope.TaskContract without
+# judging it (shaping is its only job); scope.Compile → compileClause then rejects
+# the unknown dimension with "unsupported scope dimension \"ownership\"".
+#
+# This is the on-message fail-closed proof (ADR-0009): rather than silently narrowing
+# to an allow-nothing or partial scope, KRSM tells the author loudly that the
+# dimension is unsupported. Load() therefore returns an error and never yields a
+# Scenario. There is deliberately NO scope.yaml, so the taskcontract path is the one
+# exercised (loadScope prefers taskcontract.yaml; a missing one would fall back to
+# scope.yaml). See expected.yaml for the loadError convention that asserts this.
+apiVersion: krsm.io/v1
+kind: TaskContract
+metadata:
+  name: restart-frontend-by-ownership
+  namespace: prod
+spec:
+  allow:
+    - dim: ownership
+      gvk: {group: apps, version: v1, kind: Deployment}
+      namespace: prod
+      name: frontend
+  maxSeverity: high

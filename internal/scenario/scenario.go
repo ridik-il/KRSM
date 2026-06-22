@@ -9,6 +9,7 @@ package scenario
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,8 +75,9 @@ func Load(dir string) (*Scenario, error) {
 // TaskContract. If taskcontract.yaml exists, it is parsed into a scope.TaskContract
 // and compiled (scope.Compile) into the dimension-typed clauses closure.Safe
 // consumes — the contract path. Otherwise it falls back to the legacy scope.yaml →
-// parseScope path, so every pre-v0.3 scenario loads unchanged. os.IsNotExist
-// distinguishes "no contract, use scope.yaml" from a real read error.
+// parseScope path, so every pre-v0.3 scenario loads unchanged. errors.Is(err,
+// os.ErrNotExist) distinguishes "no contract, use scope.yaml" from a real read
+// error, and survives any future error-wrapping in read.
 func loadScope(read func(string) ([]byte, error)) ([]closure.ScopeClause, error) {
 	contractRaw, err := read("taskcontract.yaml")
 	if err == nil {
@@ -89,7 +91,7 @@ func loadScope(read func(string) ([]byte, error)) ([]closure.ScopeClause, error)
 		}
 		return pred.Clauses, nil
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 
@@ -310,6 +312,24 @@ func matchLabels(raw json.RawMessage) (closure.LabelSelector, error) {
 	return sel, nil
 }
 
+// scopeSelectorFrom parses a scope/allow clause's selector, then collapses a
+// present-but-empty selector back to the nil selector. matchLabels turns `{}` into a
+// non-nil empty map (apimachinery "matches all"), but for an *authorisation* selector
+// that would be a silent namespace-wide over-grant; the engine treats the nil
+// selector as match-nothing (fail-safe, DESIGN §5). Both the legacy scope.yaml path
+// (parseScope) and the TaskContract path (parseTaskContract) need this identical
+// collapse, so it lives in one place.
+func scopeSelectorFrom(raw json.RawMessage) (closure.LabelSelector, error) {
+	sel, err := matchLabels(raw)
+	if err != nil {
+		return closure.LabelSelector{}, err
+	}
+	if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
+		return closure.LabelSelector{}, nil
+	}
+	return sel, nil
+}
+
 func crossRefsFrom(ns string, spec rawSpec) []closure.CrossRef {
 	// Cross-refs come from the bare-Pod spec AND the workload pod template — a
 	// Deployment/StatefulSet mounts its config under spec.template.spec.
@@ -508,16 +528,9 @@ func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 			Name:      rc.Name,
 		}
 		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
-			sel, err := matchLabels(rawClause)
+			sel, err := scopeSelectorFrom(rawClause)
 			if err != nil {
 				return nil, fmt.Errorf("parse selector scope clause: %w", err)
-			}
-			// matchLabels turns a present-but-empty selector into a non-nil empty
-			// map (apimachinery "matches all"). For a *scope* clause that is a
-			// silent namespace-wide over-grant, so collapse it back to the nil
-			// selector — the engine then matches nothing (fail-safe, DESIGN §5).
-			if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
-				sel = closure.LabelSelector{}
 			}
 			clause.Selector = sel
 		}
@@ -587,16 +600,9 @@ func parseTaskContract(raw []byte) (scope.TaskContract, error) {
 			Name:      rc.Name,
 		}
 		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
-			sel, err := matchLabels(rawClause)
+			sel, err := scopeSelectorFrom(rawClause)
 			if err != nil {
 				return scope.TaskContract{}, fmt.Errorf("parse selector allow clause: %w", err)
-			}
-			// matchLabels turns a present-but-empty selector into a non-nil empty map
-			// (apimachinery "matches all"). For an *authorisation* selector that is a
-			// silent namespace-wide over-grant, so collapse it back to the nil selector
-			// — the engine then matches nothing (fail-safe, DESIGN §5), matching parseScope.
-			if len(sel.MatchLabels) == 0 && len(sel.MatchExpressions) == 0 {
-				sel = closure.LabelSelector{}
 			}
 			ac.Selector = sel
 		}

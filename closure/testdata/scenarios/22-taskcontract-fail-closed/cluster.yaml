@@ -1,0 +1,23 @@
+# Minimal valid cluster, mirroring scenario 21's shape so it parses identically:
+# the `frontend` Deployment (app=web) plus one selected pod. Its only job is to be
+# valid enough that Load() reaches loadScope — the cluster and request must parse
+# cleanly so the failure under test is the contract-compile failure, not a manifest
+# error. The contents are otherwise irrelevant: this is a NEGATIVE golden whose
+# point is that Load() never produces a Scenario at all (see expected.yaml).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: frontend-aaa
+  namespace: prod
+  labels: {app: web}

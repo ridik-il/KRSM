@@ -6,7 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-22
+
 ### Added
+- Negative golden scenarios (ADR-0010): a scenario's `expected.yaml` may declare a
+  `loadError` substring, marking a **fail-closed proof** — `Load(dir)` must fail with a
+  matching error instead of yielding a verdict. New scenario
+  `22-taskcontract-fail-closed` carries a well-formed `taskcontract.yaml` that uses the
+  not-yet-built `dim: ownership`, proving the loader→`scope.Compile` path rejects an
+  uncompilable contract end-to-end ("unsupported scope dimension") rather than silently
+  narrowing the scope. The directory-driven golden runner (`TestScenarios`,
+  `TestClosureBoundedByInventory`) treats `loadError` scenarios as first-class; the 21
+  existing scenarios are unaffected.
 - Public `scope` package — `TaskContract`→`ScopePredicate` compiler (ADR-0009,
   realising ADR-0003 / DESIGN §6–§7). A new stdlib-only, embeddable package defines a
   Go `TaskContract` (the declarative, agent-referenced authorised scope) and
@@ -118,6 +129,7 @@ All notable changes to this project are documented here. The format follows
 - The failure-mode scenario corpus as golden tests under
   `closure/testdata/scenarios/`.
 
-[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ridik-il/krsm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ridik-il/krsm/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ridik-il/krsm/releases/tag/v0.1.0

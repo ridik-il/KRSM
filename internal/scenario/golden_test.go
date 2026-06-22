@@ -14,11 +14,16 @@ import (
 
 // expectedVerdict is the asserted outcome stored in a scenario's expected.yaml.
 type expectedVerdict struct {
-	Verdict  string     `json:"verdict"`
-	Reason   string     `json:"reason"` // optional: asserted as a substring when set
-	Closure  []humanRef `json:"closure"`
-	Escaping []humanRef `json:"escaping"`
-	External []humanRef `json:"external"`
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason"` // optional: asserted as a substring when set
+	// LoadError, when non-empty, marks a NEGATIVE golden: Load(dir) must FAIL and
+	// its error message must contain this substring (fail-closed proof, ADR-0009).
+	// The verdict/closure/escaping/external fields are then unused — there is no
+	// computable closure for a contract that never compiles.
+	LoadError string     `json:"loadError"`
+	Closure   []humanRef `json:"closure"`
+	Escaping  []humanRef `json:"escaping"`
+	External  []humanRef `json:"external"`
 }
 
 // humanRef is the Kind/namespace/name identity used in golden files (uid-free).
@@ -63,11 +68,24 @@ func TestScenarios(t *testing.T) {
 		}
 		dir := filepath.Join(scenariosRoot(), e.Name())
 		t.Run(e.Name(), func(t *testing.T) {
+			// expected.yaml is the source of truth for whether this is a negative
+			// case, so load it first. A non-empty loadError flips the scenario from
+			// "assert a verdict" to "assert Load fails closed".
+			exp := loadExpected(t, dir)
+			if exp.LoadError != "" {
+				_, err := Load(dir)
+				if err == nil {
+					t.Fatalf("Load: expected error containing %q, got nil", exp.LoadError)
+				}
+				if !strings.Contains(err.Error(), exp.LoadError) {
+					t.Fatalf("Load error = %q, want it to contain %q", err.Error(), exp.LoadError)
+				}
+				return
+			}
 			sc, err := Load(dir)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			exp := loadExpected(t, dir)
 			got := closure.Safe(sc.State, sc.Action, sc.Scope)
 
 			if got.Verdict.String() != exp.Verdict {
@@ -126,6 +144,12 @@ func TestClosureBoundedByInventory(t *testing.T) {
 		}
 		dir := filepath.Join(scenariosRoot(), e.Name())
 		t.Run(e.Name(), func(t *testing.T) {
+			// A negative golden (loadError) has no computable closure — Load fails
+			// by design — so the |C| ≤ |R| bound is undefined. Skip before requiring
+			// parseCluster/Load to succeed.
+			if loadExpected(t, dir).LoadError != "" {
+				return
+			}
 			raw, err := os.ReadFile(filepath.Join(dir, "cluster.yaml"))
 			if err != nil {
 				t.Fatalf("read cluster.yaml: %v", err)
