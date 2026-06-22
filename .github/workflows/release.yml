@@ -25,9 +25,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # syft (SBOM) and cosign (signing), both pinned.
+      # syft (SBOM) and cosign (signing). Pin the cosign BINARY (cosign-release),
+      # not just the installer action SHA: cosign v3.x defaults to the new bundle
+      # format, which deprecates the --output-signature/--output-certificate flags
+      # .goreleaser.yaml passes and fails signing ("create bundle file: open : no
+      # such file or directory"). Pin the latest 2.x, which keeps the legacy
+      # .sig/.pem output goreleaser expects. Revisit when migrating to --bundle.
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v2.6.3'
 
       # Extract THIS tag's section from CHANGELOG.md to a file OUTSIDE the repo
       # (a tracked/untracked change would make goreleaser refuse the dirty tree).
