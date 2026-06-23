@@ -1,0 +1,11 @@
+# NEGATIVE golden (fail-closed proof, ADR-0010). Asserts that Load() FAILS rather
+# than asserting a verdict/closure: an ownership clause carrying conflicting
+# clause-level identity is malformed and must not compile.
+#
+# `loadError` convention: when non-empty, the golden runner asserts Load(dir) returns
+# a non-nil error whose message CONTAINS this substring, then skips all
+# verdict/closure assertions (and the |C| ≤ |R| bound, undefined here). parseScope
+# wraps the rejection with "invalid scope clause: ..." and the ownership branch
+# reports "ownership dimension must not carry a clause-level ...", so
+# "ownership dimension must not carry a clause-level" is a stable substring.
+loadError: "ownership dimension must not carry a clause-level"

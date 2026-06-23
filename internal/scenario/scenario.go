@@ -559,6 +559,24 @@ func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 			if rc.Root == nil {
 				return nil, fmt.Errorf("invalid scope clause: ownership dimension requires a root")
 			}
+			// Reject any clause-level identity/selector field BEFORE building the clause:
+			// an ownership clause's identity may live ONLY on `root`, so a conflicting
+			// top-level field must fail closed at the parse boundary (ADR-0010) rather
+			// than be silently dropped here (which would let a malformed scope.yaml pass).
+			if rc.Group != "" || rc.Version != "" || rc.Kind != "" {
+				return nil, fmt.Errorf("invalid scope clause: ownership dimension must not carry a clause-level GVK (group/version/kind); identity lives on root")
+			}
+			if rc.Namespace != "" {
+				return nil, fmt.Errorf("invalid scope clause: ownership dimension must not carry a clause-level namespace; identity lives on root")
+			}
+			if rc.Name != "" {
+				return nil, fmt.Errorf("invalid scope clause: ownership dimension must not carry a clause-level name; identity lives on root")
+			}
+			if sel, serr := scopeSelectorFrom(rawClause); serr != nil {
+				return nil, fmt.Errorf("parse ownership scope clause selector: %w", serr)
+			} else if len(sel.MatchLabels) > 0 || len(sel.MatchExpressions) > 0 {
+				return nil, fmt.Errorf("invalid scope clause: ownership dimension must not carry a clause-level selector; identity lives on root")
+			}
 			rootNS := nsOf(rc.Root.Kind, rc.Root.Namespace)
 			clause = closure.OwnershipClause(closure.Ref{
 				GVK:       closure.GVK{Group: rc.Root.Group, Version: rc.Root.Version, Kind: rc.Root.Kind},

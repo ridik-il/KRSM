@@ -98,13 +98,28 @@ func (sr *stateResolver) labels(r Ref) (map[string]string, bool) {
 // visited-set guard, collecting Ref.key() for root and every transitively owned
 // resource. It mirrors Closure's cascade step exactly, so "owned" means the same
 // thing on both sides of C ⊆ scope(T). Finite and cycle-safe: each resource is
-// visited once (|subtree| ≤ |R|). Memoized per root.key().
+// visited once (|subtree| ≤ |R|). Memoized per the caller-provided root.key().
+//
+// The root is normalized via State.Get so a uid-less clause Root (built outside the
+// loader — e.g. via the OwnershipClause constructor or scope.Derive on a uid-less
+// target) still covers itself: closure members are keyed by their UID-bearing
+// Ref.key() ("uid:<uid>"), so the BFS seeds from the canonical (looked-up) Ref and
+// the returned membership admits BOTH the caller-provided root.key() AND the
+// canonical o.Ref.key(). If Get returns !ok the root is absent from state, so today's
+// fail-closed behavior is kept (seed only with the provided root.key()).
 func (sr *stateResolver) ownedSubtree(root Ref) map[string]bool {
 	if m, ok := sr.subtrees[root.key()]; ok {
 		return m
 	}
 	members := map[string]bool{}
-	queue := []Ref{root}
+	// Normalize to the canonical Ref so OwnedChildren and the closure-side key agree
+	// even when the clause Root lacks a UID. An absent root keeps the fail-closed path
+	// (BFS from the provided Ref only). BFS keys members by the canonical Ref.key().
+	start := root
+	if o, ok := sr.s.Get(root); ok {
+		start = o.Ref
+	}
+	queue := []Ref{start}
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -114,6 +129,10 @@ func (sr *stateResolver) ownedSubtree(root Ref) map[string]bool {
 		members[cur.key()] = true
 		queue = append(queue, sr.s.OwnedChildren(cur)...)
 	}
+	// Admit the caller-provided root key too: closure members carry their UID-bearing
+	// key, while a uid-less clause Root keys itself by the human form — both must mean
+	// "the root", so the root never escapes its own subtree.
+	members[root.key()] = true
 	sr.subtrees[root.key()] = members
 	return members
 }

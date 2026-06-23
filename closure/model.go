@@ -185,11 +185,13 @@ func (c ScopeClause) hasSelector() bool {
 //     other value (a typo, or a not-yet-implemented dimension) is rejected —
 //     fail-closed, not coerced.
 //   - A resource clause must NOT carry a Selector (the selector would be silently
-//     ignored, masking a clause that meant to be a selector clause).
-//   - A selector clause must NOT carry a Name (the Name would be silently ignored).
+//     ignored, masking a clause that meant to be a selector clause) or a Root (the
+//     ownership dimension owns Root; any other dimension would silently ignore it).
+//   - A selector clause must NOT carry a Name or a Root (both would be silently
+//     ignored).
 //   - A namespace clause must carry a non-empty Namespace (a "namespace" clause that
-//     names no namespace is malformed) and must NOT carry a Name or a Selector (both
-//     would be silently ignored).
+//     names no namespace is malformed) and must NOT carry a Name, a Selector or a
+//     Root (all would be silently ignored).
 //   - An ownership clause's identity lives entirely on Root: Root must carry a
 //     GVK.Kind and a Name, and the clause must NOT carry a clause-level Name,
 //     Selector, GVK or Namespace (all would be silently ignored — the subtree is
@@ -203,9 +205,15 @@ func (c ScopeClause) Validate() error {
 		if c.hasSelector() {
 			return fmt.Errorf("scope clause %s/%s/%s: resource dimension must not carry a selector", c.GVK.Kind, c.Namespace, c.Name)
 		}
+		if c.Root != (Ref{}) {
+			return fmt.Errorf("scope clause %s/%s/%s: resource dimension must not carry a Root; the ownership dimension owns Root", c.GVK.Kind, c.Namespace, c.Name)
+		}
 	case DimSelector:
 		if c.Name != "" {
 			return fmt.Errorf("scope clause %s/%s: selector dimension must not carry a name (got %q)", c.GVK.Kind, c.Namespace, c.Name)
+		}
+		if c.Root != (Ref{}) {
+			return fmt.Errorf("scope clause %s/%s: selector dimension must not carry a Root; the ownership dimension owns Root", c.GVK.Kind, c.Namespace)
 		}
 	case DimNamespace:
 		if c.Namespace == "" {
@@ -216,6 +224,9 @@ func (c ScopeClause) Validate() error {
 		}
 		if c.hasSelector() {
 			return fmt.Errorf("scope clause %s/%s: namespace dimension must not carry a selector", c.GVK.Kind, c.Namespace)
+		}
+		if c.Root != (Ref{}) {
+			return fmt.Errorf("scope clause %s/%s: namespace dimension must not carry a Root; the ownership dimension owns Root", c.GVK.Kind, c.Namespace)
 		}
 	case DimOwnership:
 		if c.Root.GVK.Kind == "" || c.Root.Name == "" {

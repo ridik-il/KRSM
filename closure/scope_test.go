@@ -91,6 +91,13 @@ func TestScopeClauseValidate(t *testing.T) {
 		{"unknown dim", ScopeClause{Dim: "reference", GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1"}, true},
 		{"resource with selector", ScopeClause{Dim: DimResource, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1", Selector: LabelSelector{MatchLabels: map[string]string{"app": "web"}}}, true},
 		{"selector with name", ScopeClause{Dim: DimSelector, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1", Selector: LabelSelector{MatchLabels: map[string]string{"app": "web"}}}, true},
+		// A stray Root on a non-ownership clause is a hard error: the ownership
+		// dimension owns Root, so any other dimension would silently ignore it
+		// (Validate-rules table, docs/design/v0.4-derived-scope.md §Data model).
+		{"resource with root", ScopeClause{Dim: DimResource, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1", Root: Ref{GVK: GVK{Kind: "Deployment"}, Namespace: "prod", Name: "web"}}, true},
+		{"empty dim with root", ScopeClause{GVK: GVK{Kind: "Pod"}, Namespace: "prod", Name: "web-1", Root: Ref{GVK: GVK{Kind: "Deployment"}, Namespace: "prod", Name: "web"}}, true},
+		{"selector with root", ScopeClause{Dim: DimSelector, GVK: GVK{Kind: "Pod"}, Namespace: "prod", Selector: LabelSelector{MatchLabels: map[string]string{"app": "web"}}, Root: Ref{GVK: GVK{Kind: "Deployment"}, Namespace: "prod", Name: "web"}}, true},
+		{"namespace with root", ScopeClause{Dim: DimNamespace, Namespace: "prod", Root: Ref{GVK: GVK{Kind: "Deployment"}, Namespace: "prod", Name: "web"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -351,6 +358,33 @@ func TestOwnershipDimCyclicOwnersTerminate(t *testing.T) {
 	d := Safe(s, act, scope)
 	if d.Verdict != Allow || len(d.Escaping) != 0 {
 		t.Fatalf("verdict = %s escaping = %v, want Allow with the whole cycle in subtree", d.Verdict, escapedNames(d))
+	}
+}
+
+// TestOwnershipDimUIDLessRootStaysInSubtree: when an OwnershipClause is built with a
+// Root that has the same Kind/ns/name as the live root object but an EMPTY UID (e.g.
+// via the public OwnershipClause constructor, or scope.Derive on a uid-less target),
+// the root must still cover itself. The live closure keys the root by its UID-bearing
+// Ref.key() ("uid:..."), so ownedSubtree must admit both the caller-provided key and
+// the canonical UID-based key — otherwise the root escapes its OWN subtree. Observed
+// through Safe/Decision.Escaping (no unexported access).
+func TestOwnershipDimUIDLessRootStaysInSubtree(t *testing.T) {
+	root := Ref{GVK: GVK{Kind: "Deployment"}, Namespace: "prod", Name: "web", UID: "uid:Deployment/prod/web"}
+	child := Ref{GVK: GVK{Kind: "ReplicaSet"}, Namespace: "prod", Name: "web-rs", UID: "uid:ReplicaSet/prod/web-rs"}
+	objs := []Object{
+		{Ref: root},
+		{Ref: child, Owners: []OwnerRef{{Kind: "Deployment", Name: "web", UID: root.UID}}},
+	}
+	s := NewScanState(objs)
+	a := Action{Verb: Delete, Target: root, Cascade: true}
+
+	// The clause Root carries the same identity as the live object but NO UID.
+	uidLessRoot := Ref{GVK: GVK{Kind: "Deployment"}, Namespace: "prod", Name: "web"}
+	scope := []ScopeClause{OwnershipClause(uidLessRoot)}
+
+	d := Safe(s, a, scope)
+	if d.Verdict != Allow || len(d.Escaping) != 0 {
+		t.Fatalf("verdict = %s escaping = %v, want Allow with the root and child both in subtree (root must not escape its own subtree)", d.Verdict, escapedNames(d))
 	}
 }
 
