@@ -126,6 +126,25 @@ func TestParseScopeOwnershipClause(t *testing.T) {
 	}
 }
 
+// TestParseScopeNonOwnershipRejectsRoot: a non-ownership clause (dim: resource,
+// selector, or namespace) must not carry a `root` — that field is meaningful only for
+// dim: ownership. The non-ownership parse branch used to ignore rc.Root, silently
+// dropping it; since ScopeClause.Validate now treats a stray Root as a hard error, the
+// loader must reject it at the parse boundary (fail-closed, ADR-0010) with a clear
+// error rather than build a clause whose Root is lost.
+func TestParseScopeNonOwnershipRejectsRoot(t *testing.T) {
+	raw := []byte("scope:\n" +
+		"  - dim: resource\n" +
+		"    kind: Pod\n" +
+		"    namespace: prod\n" +
+		"    name: web-1\n" +
+		"    root: {group: apps, version: v1, kind: Deployment, namespace: prod, name: web}\n")
+
+	if _, err := parseScope(raw); err == nil {
+		t.Fatal("parseScope(dim: resource with a root) = nil error, want rejection of the stray root")
+	}
+}
+
 // TestParseScopeOwnershipMissingRoot: a `dim: ownership` clause with no `root`
 // fails loudly at load rather than building a malformed (empty-Root) clause.
 func TestParseScopeOwnershipMissingRoot(t *testing.T) {

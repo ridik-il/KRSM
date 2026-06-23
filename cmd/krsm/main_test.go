@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ridik-il/krsm/closure"
+	"github.com/ridik-il/krsm/internal/scenario"
 )
 
 func scenarioDir(name string) string {
@@ -34,6 +35,35 @@ func TestCheckSelectorScenarioAllows(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout missing %q; got:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestWriteReportAuditDowngradeRendersExternal: closure.Safe populates BOTH Escaping
+// and External on the same Decision (a scope escape that also crosses the cluster
+// boundary). When --mode audit downgrades that Block to Warn, writeReport's
+// audit-downgraded branch must render the External refs too — not silently drop the
+// cross-boundary detail. The external refs are written somewhere visible (stdout or
+// stderr), consistent with how the pure-Warn branch surfaces External detail.
+func TestWriteReportAuditDowngradeRendersExternal(t *testing.T) {
+	var out, errOut bytes.Buffer
+	sc := &scenario.Scenario{ScopeSource: "derived (ownership-tree)"}
+	dec := closure.Decision{
+		Verdict: closure.Warn,
+		Reason:  "affected-resource closure escapes task scope (audit: downgraded from BLOCK)",
+		Escaping: []closure.Ref{
+			{GVK: closure.GVK{Version: "v1", Kind: "Service"}, Namespace: "prod", Name: "web-svc"},
+		},
+		External: []closure.Ref{
+			{GVK: closure.GVK{Kind: "External"}, Namespace: "prod", Name: "example.com/external-lb"},
+		},
+	}
+	writeReport(&out, &errOut, sc, dec, true)
+	combined := out.String() + errOut.String()
+	if !strings.Contains(combined, "Service/prod/web-svc") {
+		t.Errorf("audit-downgrade report dropped the escaping ref; got stdout:\n%s\nstderr:\n%s", out.String(), errOut.String())
+	}
+	if !strings.Contains(combined, "External/prod/example.com/external-lb") {
+		t.Errorf("audit-downgrade report dropped the External (cross-boundary) ref; got stdout:\n%s\nstderr:\n%s", out.String(), errOut.String())
 	}
 }
 

@@ -34,10 +34,13 @@ Usage:
   krsm <command>
 
 Commands:
-  check [flags] <dir>     Run the closure check for a scenario directory
-                          (cluster.yaml, request.yaml, scope.yaml) and print
-                          the verdict. --plain emits ASCII without emoji;
-                          --mode audit|enforce governs scope-escape handling.
+  check [flags] <dir>     Run the closure check for a scenario directory and
+                          print the verdict. The dir needs cluster.yaml +
+                          request.yaml; scope is optional — it comes from
+                          taskcontract.yaml OR scope.yaml, and is otherwise
+                          derived (a Level-0 ownership tree of the target).
+                          --plain emits ASCII without emoji; --mode
+                          audit|enforce governs scope-escape handling.
   version                 Print the krsm version
   help                    Show this help
 
@@ -49,8 +52,10 @@ and docs/DESIGN.md for the architecture.
 
 const checkUsage = `Usage: krsm check [--plain] [--mode audit|enforce] <scenario-dir>
 
-Loads cluster.yaml, request.yaml and scope.yaml from <scenario-dir>, computes the
-affected-resource closure, and prints the ACTION / SCOPE / CLOSURE / VERDICT report.
+Requires cluster.yaml + request.yaml from <scenario-dir>. Scope is optional: it comes
+from taskcontract.yaml OR scope.yaml, and is otherwise derived (a Level-0 ownership tree
+of the target). Computes the affected-resource closure and prints the
+ACTION / SCOPE / CLOSURE / VERDICT report.
 
 Flags:
   --plain          ASCII output without emoji (for CI logs / non-UTF8 terminals)
@@ -173,6 +178,14 @@ func writeReport(stdout, stderr io.Writer, sc *scenario.Scenario, dec closure.De
 		// marks the audit downgrade.
 		fmt.Fprintf(stdout, "%-8s %sWARN — %s:\n", "VERDICT", icon(closure.Warn, plain), dec.Reason)
 		writeDetail(stdout, dec.Escaping)
+		// closure.Safe populates BOTH Escaping and External on the same Decision, so a
+		// downgraded scope-escape may also carry cross-boundary effects. Surface them on
+		// stderr with the same labeled header the pure-Warn branch uses, rather than
+		// silently dropping the External detail.
+		if len(dec.External) > 0 {
+			fmt.Fprintf(stderr, "%-8s %sWARN — closure crosses the cluster boundary (external effect):\n", "VERDICT", icon(closure.Warn, plain))
+			writeDetail(stderr, dec.External)
+		}
 	case dec.Verdict == closure.Warn:
 		fmt.Fprintf(stdout, "%-8s %sWARN — %s (detail on stderr)\n", "VERDICT", icon(closure.Warn, plain), dec.Reason)
 		fmt.Fprintf(stderr, "%-8s %sWARN — %s:\n", "VERDICT", icon(closure.Warn, plain), dec.Reason)

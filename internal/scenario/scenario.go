@@ -585,6 +585,13 @@ func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 				UID:       uidOf(rc.Root.Kind, rootNS, rc.Root.Name),
 			})
 		} else {
+			// `root` is meaningful only for dim: ownership. A stray root on a resource/
+			// selector/namespace clause must fail closed at the parse boundary (ADR-0010)
+			// rather than be silently dropped — Validate now treats a stray Root as a hard
+			// error, but the dropped value would never reach it.
+			if rc.Root != nil {
+				return nil, fmt.Errorf("invalid scope clause: only the ownership dimension may carry a root; dim %q must not", rc.Dim)
+			}
 			clause = closure.ScopeClause{
 				Dim:       closure.ScopeDim(rc.Dim),
 				GVK:       closure.GVK{Group: rc.Group, Version: rc.Version, Kind: rc.Kind},

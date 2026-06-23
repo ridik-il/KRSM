@@ -57,7 +57,7 @@ All notable changes to this project are documented here. The format follows
   the future `reference` dimension without accumulating positional functions.
   `closure.Safe`'s public signature and the closure walk are unchanged; `archguard`
   confirms `closure` and `scope` stay stdlib-only; all existing goldens are unchanged
-  (corpus now 26 scenarios, 22 prior + 23–26).
+  (corpus now 27 scenarios, 22 prior + 23–27).
 
 ## [0.3.0] - 2026-06-22
 
