@@ -1,0 +1,55 @@
+# The scenario-01 topology, scoped by ownership: a Deployment owns a ReplicaSet that
+# owns two Pods, and a Service selects those pods (app=web). A cascade delete's
+# closure pulls in the owned subtree (Deployment/ReplicaSet/Pods) AND the Service via
+# the pod→selector binding. But the Deployment does NOT own the Service — it is a
+# separate object that merely routes to the pods — so the Service falls OUTSIDE the
+# ownership tree. This is the "aha": the derived ownership default flags the broken
+# Service that a bare namespace boundary would have let through.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-rs
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: Deployment, name: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: ReplicaSet, name: web-rs}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-2
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: ReplicaSet, name: web-rs}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc
+  namespace: prod
+spec:
+  selector: {app: web}

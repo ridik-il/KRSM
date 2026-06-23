@@ -1,0 +1,15 @@
+# The closure is the Deployment, its ReplicaSet and both Pods — the Deployment's
+# transitive owned subtree. The ownership-dim clause rooted at the Deployment
+# authorises exactly that subtree (the same owner→child walk the closure uses), so
+# every closure member is in scope; nothing escapes and there is no cross-boundary
+# effect → Allow. This is the end-to-end proof that a `dim: ownership` clause covers
+# a whole ownership tree, and that scope-ownership and closure-ownership agree by
+# construction.
+verdict: Allow
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: ReplicaSet, namespace: prod, name: web-rs}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+escaping: []
+external: []

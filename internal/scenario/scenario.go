@@ -22,12 +22,25 @@ import (
 	"github.com/ridik-il/krsm/scope"
 )
 
-// Scenario is a runnable check input: the three things closure.Safe needs.
+// Scenario is a runnable check input: the three things closure.Safe needs, plus the
+// human-readable provenance of the scope for the verdict report.
 type Scenario struct {
 	State  closure.State
 	Action closure.Action
 	Scope  []closure.ScopeClause
+	// ScopeSource is the human provenance of Scope for the SCOPE line — one of
+	// scopeSource* below ("taskcontract.yaml", "scope.yaml", "derived (ownership-tree)").
+	ScopeSource string
 }
+
+// scopeSource* are the human-readable provenances reported on the SCOPE line. They
+// mirror scope.Provenance but are phrased for the operator (the CLI prints them; the
+// scope package's ProvenanceDerivedOwner is the machine form).
+const (
+	scopeSourceContract  = "taskcontract.yaml"
+	scopeSourceScopeYAML = "scope.yaml"
+	scopeSourceDerived   = "derived (ownership-tree)"
+)
 
 // Load reads cluster.yaml, request.yaml and scope.yaml from dir and builds a
 // Scenario. It deliberately does not read expected.yaml — that is a test-only
@@ -59,47 +72,62 @@ func Load(dir string) (*Scenario, error) {
 		return nil, err
 	}
 
-	scope, err := loadScope(read)
+	scopeClauses, source, err := loadScope(read, action.Target)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Scenario{
-		State:  closure.NewScanState(objs),
-		Action: action,
-		Scope:  scope,
+		State:       closure.NewScanState(objs),
+		Action:      action,
+		Scope:       scopeClauses,
+		ScopeSource: source,
 	}, nil
 }
 
-// loadScope resolves a scenario's authorised scope, preferring the user-facing
-// TaskContract. If taskcontract.yaml exists, it is parsed into a scope.TaskContract
-// and compiled (scope.Compile) into the dimension-typed clauses closure.Safe
-// consumes — the contract path. Otherwise it falls back to the legacy scope.yaml →
-// parseScope path, so every pre-v0.3 scenario loads unchanged. errors.Is(err,
-// os.ErrNotExist) distinguishes "no contract, use scope.yaml" from a real read
-// error, and survives any future error-wrapping in read.
-func loadScope(read func(string) ([]byte, error)) ([]closure.ScopeClause, error) {
+// loadScope resolves a scenario's authorised scope and its human provenance, in
+// descending order of declaredness (ADR-0011 progressive scope):
+//
+//  1. taskcontract.yaml → parseTaskContract → scope.Compile — the declared-contract path.
+//  2. scope.yaml → parseScope — the legacy explicit-clause path (pre-v0.3 scenarios).
+//  3. neither file present → scope.Derive(target) — the Level-0 derived default: a
+//     single ownership clause rooted at the action target, the zero-config verdict.
+//
+// errors.Is(err, os.ErrNotExist) distinguishes "file absent, fall through" from a real
+// read error for BOTH files, so a genuine I/O failure is never silently treated as
+// "no scope" — and the check survives any future error-wrapping in read. target is the
+// parsed action target Load already holds; it is only consulted on the derived path.
+func loadScope(read func(string) ([]byte, error), target closure.Ref) ([]closure.ScopeClause, string, error) {
 	contractRaw, err := read("taskcontract.yaml")
 	if err == nil {
 		tc, perr := parseTaskContract(contractRaw)
 		if perr != nil {
-			return nil, perr
+			return nil, "", perr
 		}
 		pred, cerr := scope.Compile(tc)
 		if cerr != nil {
-			return nil, fmt.Errorf("compile taskcontract: %w", cerr)
+			return nil, "", fmt.Errorf("compile taskcontract: %w", cerr)
 		}
-		return pred.Clauses, nil
+		return pred.Clauses, scopeSourceContract, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+		return nil, "", err
 	}
 
 	scopeRaw, err := read("scope.yaml")
-	if err != nil {
-		return nil, err
+	if err == nil {
+		clauses, perr := parseScope(scopeRaw)
+		if perr != nil {
+			return nil, "", perr
+		}
+		return clauses, scopeSourceScopeYAML, nil
 	}
-	return parseScope(scopeRaw)
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, "", err
+	}
+
+	// No declared scope at all: synthesize the Level-0 ownership tree of the target.
+	return scope.Derive(target).Clauses, scopeSourceDerived, nil
 }
 
 // --- raw manifest parsing ---------------------------------------------------
@@ -500,12 +528,13 @@ func parseAction(raw []byte) (closure.Action, error) {
 // built by the same matchLabels conversion the cluster loader uses for
 // Object.Selector — one selector parse path.
 type rawScopeClause struct {
-	Dim       string `json:"dim"`
-	Group     string `json:"group"`
-	Version   string `json:"version"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
+	Dim       string  `json:"dim"`
+	Group     string  `json:"group"`
+	Version   string  `json:"version"`
+	Kind      string  `json:"kind"`
+	Namespace string  `json:"namespace"`
+	Name      string  `json:"name"`
+	Root      *rawRef `json:"root"` // DimOwnership only: the subtree root
 }
 
 func parseScope(raw []byte) ([]closure.ScopeClause, error) {
@@ -521,18 +550,36 @@ func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 		if err := json.Unmarshal(rawClause, &rc); err != nil {
 			return nil, fmt.Errorf("parse scope clause: %w", err)
 		}
-		clause := closure.ScopeClause{
-			Dim:       closure.ScopeDim(rc.Dim),
-			GVK:       closure.GVK{Group: rc.Group, Version: rc.Version, Kind: rc.Kind},
-			Namespace: nsOf(rc.Kind, rc.Namespace),
-			Name:      rc.Name,
-		}
-		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
-			sel, err := scopeSelectorFrom(rawClause)
-			if err != nil {
-				return nil, fmt.Errorf("parse selector scope clause: %w", err)
+		var clause closure.ScopeClause
+		if closure.ScopeDim(rc.Dim) == closure.DimOwnership {
+			// An ownership clause carries identity only on Root: resolve the root's
+			// synthetic uid via uidOf (exactly as the action target is resolved) and
+			// nsOf for its namespace, so ownedSubtree membership matches by uid like
+			// the closure does. No clause-level GVK/Namespace/Name (Validate rejects them).
+			if rc.Root == nil {
+				return nil, fmt.Errorf("invalid scope clause: ownership dimension requires a root")
 			}
-			clause.Selector = sel
+			rootNS := nsOf(rc.Root.Kind, rc.Root.Namespace)
+			clause = closure.OwnershipClause(closure.Ref{
+				GVK:       closure.GVK{Group: rc.Root.Group, Version: rc.Root.Version, Kind: rc.Root.Kind},
+				Namespace: rootNS,
+				Name:      rc.Root.Name,
+				UID:       uidOf(rc.Root.Kind, rootNS, rc.Root.Name),
+			})
+		} else {
+			clause = closure.ScopeClause{
+				Dim:       closure.ScopeDim(rc.Dim),
+				GVK:       closure.GVK{Group: rc.Group, Version: rc.Version, Kind: rc.Kind},
+				Namespace: nsOf(rc.Kind, rc.Namespace),
+				Name:      rc.Name,
+			}
+			if closure.ScopeDim(rc.Dim) == closure.DimSelector {
+				sel, err := scopeSelectorFrom(rawClause)
+				if err != nil {
+					return nil, fmt.Errorf("parse selector scope clause: %w", err)
+				}
+				clause.Selector = sel
+			}
 		}
 		// Validate structural consistency (and reject an unknown dimension) at load
 		// time so a typo'd or malformed scope.yaml fails loudly here rather than

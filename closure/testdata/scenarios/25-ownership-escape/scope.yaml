@@ -1,0 +1,6 @@
+# An ownership-dim clause rooted at the `web` Deployment: it covers the Deployment
+# and its transitive owned subtree (the ReplicaSet and both Pods) — but NOT the
+# Service, which the Deployment does not own.
+scope:
+  - dim: ownership
+    root: {group: apps, version: v1, kind: Deployment, namespace: prod, name: web}

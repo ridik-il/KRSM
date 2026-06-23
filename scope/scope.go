@@ -77,11 +77,77 @@ func (s Severity) valid() bool {
 	}
 }
 
+// Provenance records how a ScopePredicate's scope was obtained, so the verdict
+// report can distinguish a declared scope from a synthesized one (ADR-0011). It does
+// not affect the closure decision — only how the operator is told the scope arose.
+type Provenance string
+
+const (
+	// ProvenanceContract marks a scope lowered from a declared TaskContract by Compile
+	// (ADR-0009): a human (or agent) authored the allow-clauses.
+	ProvenanceContract Provenance = "contract"
+	// ProvenanceDerivedOwner marks a Level-0 scope synthesized by Derive from the
+	// action's target alone — the target's ownership tree — with no declared scope.
+	ProvenanceDerivedOwner Provenance = "derived:ownership-tree"
+)
+
 // ScopePredicate is a compiled TaskContract: the clauses closure.Safe consumes,
-// plus the (unenforced) maxSeverity. Callers pass predicate.Clauses to Safe.
+// plus the (unenforced) maxSeverity and the Provenance of the scope. Callers pass
+// predicate.Clauses to Safe.
 type ScopePredicate struct {
 	Clauses     []closure.ScopeClause
 	MaxSeverity Severity
+	Provenance  Provenance
+}
+
+// Derive synthesizes a Level-0 ScopePredicate from an action target that has no
+// declared scope (ADR-0011): a single ownership clause rooted at the target, covering
+// the target plus everything it transitively owns. It is deliberately NOT OR'd with a
+// namespace clause — under the union semantics of C ⊆ scope a "everything in the
+// target's namespace" clause would re-admit the same-namespace collateral the
+// ownership tree is meant to flag (it would Allow scenario 01), and it is redundant
+// besides (a cross-namespace member is already outside the tree).
+//
+// Derive is pure and stdlib-only: the state-dependence of the ownership dimension
+// lives in the engine's matchScope (it walks the live owner→child relation), exactly
+// as for the selector dimension — so Derive needs no State and stays embeddable.
+func Derive(target closure.Ref) ScopePredicate {
+	return ScopePredicate{
+		Clauses:    []closure.ScopeClause{closure.OwnershipClause(target)},
+		Provenance: ProvenanceDerivedOwner,
+	}
+}
+
+// Mode governs how a scope-escape verdict is reported (ADR-0011), applied above the
+// unchanged closure.Safe. ModeAudit is the install default: a scope-escape Block is
+// surfaced as a Warn (never a deny) so a day-0 false positive does not get KRSM
+// uninstalled; ModeEnforce is opt-in and leaves the verdict as Safe decided it.
+type Mode string
+
+const (
+	// ModeAudit downgrades a scope-escape Block to Warn (the install default).
+	ModeAudit Mode = "audit"
+	// ModeEnforce returns Safe's decision unchanged.
+	ModeEnforce Mode = "enforce"
+)
+
+// Apply maps a decision for the mode, above the unchanged closure.Safe. In ModeAudit
+// a scope-escape Block (len(Escaping) > 0 — the closure was computed and a member
+// escaped) is downgraded to Warn, preserving Escaping/Closure/External and rewriting
+// Reason to name the audit downgrade, so the report still shows what would block. A
+// fail-closed Block (len(Escaping) == 0 — the closure could not be computed, DESIGN
+// §5) is NOT softened: an unbounded blast radius stays a deny even in audit.
+// ModeEnforce returns the decision unchanged.
+func (m Mode) Apply(d closure.Decision) closure.Decision {
+	if m != ModeAudit {
+		return d
+	}
+	if d.Verdict != closure.Block || len(d.Escaping) == 0 {
+		return d
+	}
+	d.Verdict = closure.Warn
+	d.Reason = "audit: " + d.Reason + " (would Block under --mode enforce)"
+	return d
 }
 
 // Compile lowers a TaskContract to a ScopePredicate, or fails closed. It errors on
@@ -112,7 +178,7 @@ func Compile(tc TaskContract) (ScopePredicate, error) {
 		}
 		clauses = append(clauses, clause)
 	}
-	return ScopePredicate{Clauses: clauses, MaxSeverity: tc.Spec.MaxSeverity}, nil
+	return ScopePredicate{Clauses: clauses, MaxSeverity: tc.Spec.MaxSeverity, Provenance: ProvenanceContract}, nil
 }
 
 // compileClause lowers one AllowClause to a closure.ScopeClause, failing closed on

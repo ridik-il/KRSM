@@ -6,6 +6,59 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Derived default scope — Level 0 (ADR-0011, ROADMAP v0.4).** `krsm check <dir>` now
+  returns a verdict with **no `scope.yaml` and no `taskcontract.yaml`**. The loader
+  synthesizes a conservative scope from the request target via a new, pure, stdlib-only
+  `scope.Derive(target) ScopePredicate` — a single `ownership`-dimension clause rooted
+  at the target (the target plus everything it transitively owns), deliberately *not*
+  OR'd with a namespace clause (under the union semantics of `C ⊆ scope` a namespace
+  clause would re-admit the same-namespace collateral the tree is meant to flag, and it
+  is redundant since anything cross-namespace is already outside the tree). This catches
+  the flagship intra-namespace cascade with zero declared scope: the broken Service is
+  in the closure but is not owned by the Deployment, so it escapes the derived tree. New
+  golden `26-derived-default` pins this zero-config verdict.
+- **Two new scope dimensions** (DESIGN §6; the ADR-0008/0009 deferral pulled forward by
+  ADR-0011):
+  - `dim: namespace` (`closure.DimNamespace` / `closure.NamespaceClause(gvk, ns)`) —
+    every candidate in a namespace, with an optional GVK gate; a pure-`Ref` match (no
+    state). New golden `23-namespace-scope`.
+  - `dim: ownership` (`closure.DimOwnership` / `closure.OwnershipClause(root)`) — a root
+    plus its transitive owned subtree; **state-dependent**, computed by the *same*
+    `State.OwnedChildren` owner→child walk `closure.Closure` uses, so scope-ownership and
+    closure-ownership agree by construction (visited-set guarded, `|subtree| ≤ |R|`,
+    cycle-safe, memoized per root). New goldens `24-ownership-scope` (the cascade is in
+    scope) and `25-ownership-escape` (a non-owned member escapes).
+  - `closure.ScopeClause` gains a `Root Ref` field (ownership only) and `Validate`
+    extends to the two dimensions (each clause carries only its own fields; a stray
+    field is a hard error at load).
+- **Scope provenance.** `scope.ScopePredicate` gains `Provenance`
+  (`contract` | `derived:ownership-tree`): `Compile` stamps `ProvenanceContract`,
+  `Derive` stamps `ProvenanceDerivedOwner`. The `krsm check` SCOPE line now reports the
+  scope's source (`scope.yaml`, `taskcontract.yaml`, or `derived (ownership-tree)`) and
+  renders the new dimensions readably (`ns:prod/*`, `owns:Deployment.apps/prod/web`).
+- **Audit/enforce verdict mode (ADR-0011 audit-first default).** `scope.Mode`
+  (`ModeAudit` default / `ModeEnforce`) with `Mode.Apply(closure.Decision) closure.Decision`,
+  applied *above* the unchanged `closure.Safe`. In audit a **scope-escape** Block
+  (`len(Escaping) > 0`) is downgraded to `Warn` — exit `0`, with the escaping set still
+  printed so the operator sees what *would* block — while a **fail-closed** Block (empty
+  `Escaping`: closure uncomputable, DESIGN §5) is *not* softened. `krsm check` gains
+  `--mode audit|enforce` (default `audit`); the exit status acts on the *applied* verdict.
+
+### Changed
+- **`krsm check` default verdict mode is now `audit`.** A scope-escape that previously
+  exited `2` (Block) now exits `0` (a Warn, with the escaping detail shown) unless
+  `--mode enforce` is passed — the Falco/Kyverno adoption lesson (ADR-0011), so a day-0
+  false positive does not get KRSM uninstalled. Pass `--mode enforce` for the prior
+  block-and-exit-`2` behaviour.
+- **Internal (`closure`, non-breaking):** `matchScope`'s label-lookup seam widened from
+  a bare `labelsOf` function to a narrow unexported `scopeResolver` interface (`labels` +
+  memoized `ownedSubtree`), built by `Safe` from the `State` it already holds — room for
+  the future `reference` dimension without accumulating positional functions.
+  `closure.Safe`'s public signature and the closure walk are unchanged; `archguard`
+  confirms `closure` and `scope` stay stdlib-only; all existing goldens are unchanged
+  (corpus now 26 scenarios, 22 prior + 23–26).
+
 ## [0.3.0] - 2026-06-22
 
 ### Added

@@ -1,0 +1,16 @@
+# The closure is the Deployment, its ReplicaSet, both Pods AND the Service (the
+# pod→selector binding). The ownership clause rooted at the Deployment covers the
+# owned subtree, so the Deployment/ReplicaSet/Pods are in scope — but the Service is
+# not owned by the Deployment, so it escapes the ownership tree → Block. This proves
+# the ownership dimension is the OWNED subtree, not a namespace boundary: a
+# same-namespace, non-owned closure member is correctly flagged.
+verdict: Block
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: ReplicaSet, namespace: prod, name: web-rs}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: Service, namespace: prod, name: web-svc}
+escaping:
+  - {kind: Service, namespace: prod, name: web-svc}
+external: []

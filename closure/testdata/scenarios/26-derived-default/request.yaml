@@ -1,0 +1,12 @@
+# Cascade-delete the `web` Deployment with no declared scope. KRSM derives the
+# Level-0 ownership scope from this target: the cascade pulls in the ReplicaSet and
+# Pods (owned, in scope); the pods' Service binding then pulls in web-svc — a closure
+# member the Deployment does not own, so it escapes the derived tree.
+verb: delete
+cascade: true
+target:
+  group: apps
+  version: v1
+  kind: Deployment
+  namespace: prod
+  name: web

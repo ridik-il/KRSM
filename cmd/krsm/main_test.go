@@ -73,7 +73,8 @@ func TestRunUnknownCommand(t *testing.T) {
 // escaping refs on stdout and signals the block via the errBlocked sentinel.
 func TestCheckBlock(t *testing.T) {
 	var out, errOut bytes.Buffer
-	err := run([]string{"check", scenarioDir("01-memory-pressure-cascade")}, &out, &errOut)
+	// --mode enforce: audit (the default) would downgrade this scope escape to WARN.
+	err := run([]string{"check", "--mode", "enforce", scenarioDir("01-memory-pressure-cascade")}, &out, &errOut)
 	if !errors.Is(err, errBlocked) {
 		t.Fatalf("run(check, block scenario) err = %v, want errBlocked", err)
 	}
@@ -149,9 +150,9 @@ func TestCheckWarnGoesToStderr(t *testing.T) {
 // TestCheckPlainNoEmoji: --plain emits ASCII only (no emoji), still BLOCK + sentinel.
 func TestCheckPlainNoEmoji(t *testing.T) {
 	var out, errOut bytes.Buffer
-	err := run([]string{"check", "--plain", scenarioDir("01-memory-pressure-cascade")}, &out, &errOut)
+	err := run([]string{"check", "--plain", "--mode", "enforce", scenarioDir("01-memory-pressure-cascade")}, &out, &errOut)
 	if !errors.Is(err, errBlocked) {
-		t.Fatalf("run(check --plain, block) err = %v, want errBlocked", err)
+		t.Fatalf("run(check --plain --mode enforce, block) err = %v, want errBlocked", err)
 	}
 	if !strings.Contains(out.String(), "BLOCK") {
 		t.Errorf("stdout missing BLOCK verdict; got:\n%s", out.String())
@@ -214,6 +215,126 @@ func TestScopeStrIncludesGroup(t *testing.T) {
 	core := closure.ScopeClause{GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespace: "prod", Name: "web-1"}
 	if got, want := scopeStr(core), "Pod/prod/web-1"; got != want {
 		t.Errorf("scopeStr(core) = %q, want %q", got, want)
+	}
+}
+
+// TestScopeStrOwnershipAndNamespace: the ownership and namespace dimensions render
+// readably on the SCOPE line — ownership as owns:<Kind[.group]>/<ns>/<name> from the
+// clause Root, namespace as ns:<ns>/* (or ns:<Kind[.group]>/<ns>/* when GVK is set).
+func TestScopeStrOwnershipAndNamespace(t *testing.T) {
+	owns := closure.OwnershipClause(closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web"})
+	if got, want := scopeStr(owns), "owns:Deployment.apps/prod/web"; got != want {
+		t.Errorf("scopeStr(ownership) = %q, want %q", got, want)
+	}
+	ns := closure.NamespaceClause(closure.GVK{}, "prod")
+	if got, want := scopeStr(ns), "ns:prod/*"; got != want {
+		t.Errorf("scopeStr(namespace) = %q, want %q", got, want)
+	}
+	nsGVK := closure.NamespaceClause(closure.GVK{Version: "v1", Kind: "Pod"}, "prod")
+	if got, want := scopeStr(nsGVK), "ns:Pod/prod/*"; got != want {
+		t.Errorf("scopeStr(namespace+gvk) = %q, want %q", got, want)
+	}
+}
+
+// TestCheckDerivedProvenance: a scenario with NO scope.yaml and NO taskcontract.yaml
+// derives a Level-0 ownership scope from the request target. The SCOPE line renders
+// the ownership clause (owns:…) and shows the derived provenance; the un-owned Service
+// escapes the tree → BLOCK (scenario-01-style cascade).
+func TestCheckDerivedProvenance(t *testing.T) {
+	var out, errOut bytes.Buffer
+	// --mode enforce so the derived-tree escape stays a BLOCK; under the audit default
+	// it would be downgraded to WARN (asserted separately in TestCheckModeAuditDowngrades).
+	err := run([]string{"check", "--mode", "enforce", scenarioDir("26-derived-default")}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("run(check --mode enforce, derived scenario) err = %v, want errBlocked (Service escapes derived tree)", err)
+	}
+	stdout := out.String()
+	for _, want := range []string{
+		"owns:Deployment.apps/prod/web", // derived ownership clause renders readably
+		"derived (ownership-tree)",      // provenance is reported
+		"BLOCK",
+		"Service/prod/web-svc", // the un-owned Service escapes
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q; got:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestCheckModeEnforceBlocks: an escaping scenario under --mode enforce renders
+// BLOCK and signals the block via errBlocked (exit 2) — the same verdict closure.Safe
+// produced, unsoftened.
+func TestCheckModeEnforceBlocks(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--mode", "enforce", scenarioDir("26-derived-default")}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("run(check --mode enforce, escape scenario) err = %v, want errBlocked", err)
+	}
+	stdout := out.String()
+	if !strings.Contains(stdout, "BLOCK") {
+		t.Errorf("stdout missing BLOCK verdict; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Service/prod/web-svc") {
+		t.Errorf("stdout missing escaping ref; got:\n%s", stdout)
+	}
+}
+
+// TestCheckModeAuditDowngrades: the SAME escaping scenario under --mode audit is
+// downgraded to WARN (exit 0, no errBlocked), still shows the escaping detail, and
+// marks the audit downgrade in the verdict line.
+func TestCheckModeAuditDowngrades(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--mode", "audit", scenarioDir("26-derived-default")}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("run(check --mode audit, escape scenario) = %v, want nil (downgraded to WARN, exit 0)", err)
+	}
+	if !strings.Contains(out.String(), "WARN") {
+		t.Errorf("stdout missing WARN verdict (audit downgrade); got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "audit") {
+		t.Errorf("stdout does not mark the audit downgrade in the verdict line; got:\n%s", out.String())
+	}
+	// The escaping detail must still be visible so the operator sees what would block.
+	if !strings.Contains(out.String()+errOut.String(), "Service/prod/web-svc") {
+		t.Errorf("audit dropped the escaping detail; stdout:\n%s\nstderr:\n%s", out.String(), errOut.String())
+	}
+}
+
+// TestCheckModeDefaultsToAudit: with no --mode flag, an escaping scenario is treated
+// as audit (WARN, exit 0) — the install default that does not deny on a day-0 escape.
+func TestCheckModeDefaultsToAudit(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", scenarioDir("26-derived-default")}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("run(check, escape scenario, default mode) = %v, want nil (default audit → WARN)", err)
+	}
+	if !strings.Contains(out.String(), "WARN") {
+		t.Errorf("default mode is not audit (expected WARN downgrade); got:\n%s", out.String())
+	}
+}
+
+// TestCheckModeInvalid: an unrecognised --mode value is a usage error (exit 1), not a
+// Block (exit 2). The error names the offending value and the valid set.
+func TestCheckModeInvalid(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--mode", "bogus", scenarioDir("26-derived-default")}, &out, &errOut)
+	if err == nil {
+		t.Fatal("run(check --mode bogus) = nil error, want a usage error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Error("invalid-mode error must not be errBlocked (exit 1, not 2)")
+	}
+}
+
+// TestCheckHelpListsMode: -h / --help mentions the --mode flag so an operator can
+// discover the audit/enforce switch.
+func TestCheckHelpListsMode(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if err := run([]string{"check", "--help"}, &out, &errOut); err != nil {
+		t.Fatalf("run(check --help) = %v, want nil", err)
+	}
+	if !strings.Contains(out.String(), "--mode") {
+		t.Errorf("check usage missing --mode; got:\n%s", out.String())
 	}
 }
 

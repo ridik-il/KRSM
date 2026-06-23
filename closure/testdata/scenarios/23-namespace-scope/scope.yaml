@@ -1,0 +1,6 @@
+# A single namespace-dim clause: "every resource in prod". No GVK gate, no name, no
+# selector — the namespace alone is the membership test. It covers the Deployment,
+# its ReplicaSet and both Pods because they all live in `prod`, so nothing escapes.
+scope:
+  - dim: namespace
+    namespace: prod
