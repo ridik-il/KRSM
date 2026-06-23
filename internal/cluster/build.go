@@ -89,8 +89,8 @@ func buildOne(o unstructured.Unstructured, scope ScopeInfo, ix nameUIDIndex) (cl
 // finalizersOf reads metadata.finalizers verbatim (nil when absent), the input to the
 // finalizer-removal cross-boundary relation (closure.ExternalEffects).
 func finalizersOf(o unstructured.Unstructured) []string {
-	fs, found, err := unstructured.NestedStringSlice(o.Object, "metadata", "finalizers")
-	if !found || err != nil {
+	fs, ok := nestedStringSlice(o.Object, "metadata", "finalizers")
+	if !ok {
 		return nil
 	}
 	return fs
@@ -99,8 +99,8 @@ func finalizersOf(o unstructured.Unstructured) []string {
 // labelsOf reads metadata.labels (nil when absent), the pod-side input to the
 // label-selector relation.
 func labelsOf(o unstructured.Unstructured) map[string]string {
-	m, found, err := unstructured.NestedStringMap(o.Object, "metadata", "labels")
-	if !found || err != nil {
+	m, ok := nestedStringMap(o.Object, "metadata", "labels")
+	if !ok {
 		return nil
 	}
 	return m
@@ -111,8 +111,8 @@ func labelsOf(o unstructured.Unstructured) map[string]string {
 // real uid on the child — exactly what closure.OwnedChildren matches on — so no
 // name-based resolution is needed.
 func ownersOf(o unstructured.Unstructured) []closure.OwnerRef {
-	refs, found, err := unstructured.NestedSlice(o.Object, "metadata", "ownerReferences")
-	if !found || err != nil {
+	refs, ok := nestedSlice(o.Object, "metadata", "ownerReferences")
+	if !ok {
 		return nil
 	}
 	out := make([]closure.OwnerRef, 0, len(refs))
@@ -182,4 +182,75 @@ func resolveNamespace(o unstructured.Unstructured, scope ScopeInfo) string {
 func nestedString(obj map[string]any, fields ...string) string {
 	s, _, _ := unstructured.NestedString(obj, fields...)
 	return s
+}
+
+// nestedSlice reads a []any at the given path WITHOUT deep-copying. The apimachinery
+// unstructured.NestedSlice deep-copies its result and PANICS ("cannot deep copy ...")
+// when a nested element is not a JSON-compatible value (e.g. a bare Go int, which a
+// real API read never produces but an adversarial/hand-built map can). Since the
+// builder only READS these slices, NestedFieldNoCopy is both panic-safe and cheaper.
+// Returns (nil, false) when absent or not a slice — callers then skip the relation.
+func nestedSlice(obj map[string]any, fields ...string) ([]any, bool) {
+	v, found, err := unstructured.NestedFieldNoCopy(obj, fields...)
+	if !found || err != nil {
+		return nil, false
+	}
+	s, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	return s, true
+}
+
+// nestedMap reads a map[string]any at the given path WITHOUT deep-copying, for the same
+// panic-safety reason as nestedSlice. Returns (nil, false) when absent or not a map.
+func nestedMap(obj map[string]any, fields ...string) (map[string]any, bool) {
+	v, found, err := unstructured.NestedFieldNoCopy(obj, fields...)
+	if !found || err != nil {
+		return nil, false
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return m, true
+}
+
+// nestedStringMap reads a map[string]string at the given path without deep-copying. It
+// mirrors unstructured.NestedStringMap's semantics (every value must be a string) but is
+// panic-safe on non-copyable contents. found is true only when the path holds a map; an
+// entry whose value is not a string makes the whole read fail (ok=false), matching
+// NestedStringMap, so a malformed labels/selector map is skipped rather than partial.
+func nestedStringMap(obj map[string]any, fields ...string) (map[string]string, bool) {
+	m, ok := nestedMap(obj, fields...)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		s, isStr := v.(string)
+		if !isStr {
+			return nil, false
+		}
+		out[k] = s
+	}
+	return out, true
+}
+
+// nestedStringSlice reads a []string at the given path without deep-copying, mirroring
+// unstructured.NestedStringSlice (every element must be a string) but panic-safe.
+func nestedStringSlice(obj map[string]any, fields ...string) ([]string, bool) {
+	s, ok := nestedSlice(obj, fields...)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(s))
+	for _, e := range s {
+		str, isStr := e.(string)
+		if !isStr {
+			return nil, false
+		}
+		out = append(out, str)
+	}
+	return out, true
 }

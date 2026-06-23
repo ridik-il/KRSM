@@ -18,15 +18,18 @@ import (
 func selectorFromUnstructured(kind string, o unstructured.Unstructured) (closure.LabelSelector, error) {
 	switch kind {
 	case "Service":
-		m, found, err := unstructured.NestedStringMap(o.Object, "spec", "selector")
-		if err != nil {
-			return closure.LabelSelector{}, fmt.Errorf("parse Service selector: %w", err)
-		}
-		if !found {
+		// A Service selector is a flat map. Distinguish ABSENT (binds nothing) from
+		// PRESENT-empty `{}` (kind decides) via found, using a no-copy read so an
+		// adversarial non-copyable value can never panic. A present-but-non-map selector
+		// (malformed) is treated as absent → binds nothing (fail-safe; a Service with a
+		// garbage selector has no resolvable endpoints).
+		if _, found := nestedMap(o.Object, "spec", "selector"); !found {
 			return closure.LabelSelector{}, nil // absent → binds nothing
 		}
-		// present (incl. {}) → non-nil map; selectorBinds decides empty-Service.
-		if m == nil {
+		m, ok := nestedStringMap(o.Object, "spec", "selector")
+		if !ok || m == nil {
+			// present but {} or non-string values: a non-nil empty map; the kind-aware
+			// selectorBinds decides an empty Service selector binds nothing.
 			m = map[string]string{}
 		}
 		return closure.LabelSelector{MatchLabels: m}, nil
@@ -44,23 +47,17 @@ func selectorFromUnstructured(kind string, o unstructured.Unstructured) (closure
 // requirements bind precisely; an unrecognised operator is REJECTED (fail-closed) — a
 // silently dropped binding would be a missed escape.
 func matchLabelsFrom(o unstructured.Unstructured, path ...string) (closure.LabelSelector, error) {
-	wrap, found, err := unstructured.NestedMap(o.Object, path...)
-	if err != nil {
-		return closure.LabelSelector{}, fmt.Errorf("parse selector: %w", err)
-	}
+	wrap, found := nestedMap(o.Object, path...)
 	if !found {
 		return closure.LabelSelector{}, nil
 	}
 
 	sel := closure.LabelSelector{}
-	if ml, ok, mlErr := unstructured.NestedStringMap(wrap, "matchLabels"); mlErr == nil && ok {
+	if ml, ok := nestedStringMap(wrap, "matchLabels"); ok {
 		sel.MatchLabels = ml
 	}
 
-	exprs, ok, exErr := unstructured.NestedSlice(wrap, "matchExpressions")
-	if exErr != nil {
-		return closure.LabelSelector{}, fmt.Errorf("parse matchExpressions: %w", exErr)
-	}
+	exprs, ok := nestedSlice(wrap, "matchExpressions")
 	if ok {
 		for _, e := range exprs {
 			m, isMap := e.(map[string]any)
@@ -72,7 +69,7 @@ func matchLabelsFrom(o unstructured.Unstructured, path ...string) (closure.Label
 			if !op.Valid() {
 				return closure.LabelSelector{}, fmt.Errorf("invalid selector operator %q for key %q (want In, NotIn, Exists or DoesNotExist)", op, key)
 			}
-			values, _, _ := unstructured.NestedStringSlice(m, "values")
+			values, _ := nestedStringSlice(m, "values")
 			sel.MatchExpressions = append(sel.MatchExpressions, closure.SelectorRequirement{
 				Key:      key,
 				Operator: op,

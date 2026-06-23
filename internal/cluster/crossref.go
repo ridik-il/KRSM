@@ -13,18 +13,18 @@ import (
 // Kind/ns/name). ns is the consumer's resolved namespace — every referent is assumed
 // same-namespace, as the loader assumes.
 func crossRefsFromUnstructured(o unstructured.Unstructured, ns string, ix nameUIDIndex) []closure.CrossRef {
-	spec, found, err := unstructured.NestedMap(o.Object, "spec")
-	if !found || err != nil {
+	spec, found := nestedMap(o.Object, "spec")
+	if !found {
 		return nil
 	}
 
 	out := podSpecCrossRefs(spec, ns, ix)
 
-	if tmpl, ok, _ := unstructured.NestedMap(spec, "template", "spec"); ok {
+	if tmpl, ok := nestedMap(spec, "template", "spec"); ok {
 		out = append(out, podSpecCrossRefs(tmpl, ns, ix)...)
 	}
 
-	if str, ok, _ := unstructured.NestedMap(spec, "scaleTargetRef"); ok {
+	if str, ok := nestedMap(spec, "scaleTargetRef"); ok {
 		k := nestedString(str, "kind")
 		n := nestedString(str, "name")
 		out = append(out, crossRef(closure.RefScaleTarget, closure.GVK{Kind: k}, ns, n, ix))
@@ -40,7 +40,7 @@ func crossRefsFromUnstructured(o unstructured.Unstructured, ns string, ix nameUI
 func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.CrossRef {
 	var out []closure.CrossRef
 
-	vols, _, _ := unstructured.NestedSlice(ps, "volumes")
+	vols, _ := nestedSlice(ps, "volumes")
 	for _, v := range vols {
 		vm, ok := v.(map[string]any)
 		if !ok {
@@ -54,7 +54,7 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 		case has(vm, "persistentVolumeClaim"):
 			out = append(out, crossRef(closure.RefVolume, pvcGVK, ns, nestedString(vm, "persistentVolumeClaim", "claimName"), ix))
 		case has(vm, "projected"):
-			srcs, _, _ := unstructured.NestedSlice(vm, "projected", "sources")
+			srcs, _ := nestedSlice(vm, "projected", "sources")
 			for _, s := range srcs {
 				sm, ok := s.(map[string]any)
 				if !ok {
@@ -71,7 +71,7 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 	}
 
 	for _, field := range []string{"containers", "initContainers", "ephemeralContainers"} {
-		cs, _, _ := unstructured.NestedSlice(ps, field)
+		cs, _ := nestedSlice(ps, field)
 		for _, c := range cs {
 			cm, ok := c.(map[string]any)
 			if !ok {
@@ -81,7 +81,7 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 		}
 	}
 
-	pulls, _, _ := unstructured.NestedSlice(ps, "imagePullSecrets")
+	pulls, _ := nestedSlice(ps, "imagePullSecrets")
 	for _, p := range pulls {
 		pm, ok := p.(map[string]any)
 		if !ok {
@@ -96,7 +96,7 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 func containerCrossRefs(c map[string]any, ns string, ix nameUIDIndex) []closure.CrossRef {
 	var out []closure.CrossRef
 
-	envFrom, _, _ := unstructured.NestedSlice(c, "envFrom")
+	envFrom, _ := nestedSlice(c, "envFrom")
 	for _, e := range envFrom {
 		em, ok := e.(map[string]any)
 		if !ok {
@@ -110,13 +110,13 @@ func containerCrossRefs(c map[string]any, ns string, ix nameUIDIndex) []closure.
 		}
 	}
 
-	env, _, _ := unstructured.NestedSlice(c, "env")
+	env, _ := nestedSlice(c, "env")
 	for _, e := range env {
 		em, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		vf, ok, _ := unstructured.NestedMap(em, "valueFrom")
+		vf, ok := nestedMap(em, "valueFrom")
 		if !ok {
 			continue
 		}
@@ -150,8 +150,9 @@ func crossRef(kind closure.RefKind, gvk closure.GVK, ns, name string, ix nameUID
 }
 
 // has reports whether a nested map exists at the given path (the unstructured
-// equivalent of "this volume source / ref kind is present").
+// equivalent of "this volume source / ref kind is present"). It uses the no-copy read
+// so an adversarial non-copyable value under the path can never panic.
 func has(obj map[string]any, fields ...string) bool {
-	_, found, err := unstructured.NestedMap(obj, fields...)
-	return found && err == nil
+	_, found := nestedMap(obj, fields...)
+	return found
 }
