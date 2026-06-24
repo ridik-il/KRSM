@@ -1,0 +1,10 @@
+# Cascade-delete the `web` Deployment: the cascade pulls in its ReplicaSet and that
+# ReplicaSet's Pods, all in `prod`.
+verb: delete
+cascade: true
+target:
+  group: apps
+  version: v1
+  kind: Deployment
+  namespace: prod
+  name: web

@@ -110,8 +110,10 @@ type Action struct {
 type ScopeDim string
 
 const (
-	DimResource ScopeDim = "resource" // flat identity: GVK + namespace + name(glob)
-	DimSelector ScopeDim = "selector" // pods/objects whose labels satisfy Selector
+	DimResource  ScopeDim = "resource"  // flat identity: GVK + namespace + name(glob)
+	DimSelector  ScopeDim = "selector"  // pods/objects whose labels satisfy Selector
+	DimNamespace ScopeDim = "namespace" // every resource in a namespace (GVK optional gate)
+	DimOwnership ScopeDim = "ownership" // a root + every resource it transitively owns
 )
 
 // ScopeClause is one allow-clause of a task's authorised scope. Exactly one
@@ -128,6 +130,7 @@ type ScopeClause struct {
 	Namespace string
 	Name      string        // DimResource only: identity or path.Match glob
 	Selector  LabelSelector // DimSelector only: matchLabels + matchExpressions
+	Root      Ref           // DimOwnership only: the subtree root (the task target)
 }
 
 // ResourceClause builds a DimResource scope clause: a flat-identity allow-clause
@@ -147,6 +150,26 @@ func SelectorClause(gvk GVK, namespace string, selector LabelSelector) ScopeClau
 	return ScopeClause{Dim: DimSelector, GVK: gvk, Namespace: namespace, Selector: selector}
 }
 
+// NamespaceClause builds a DimNamespace scope clause: a pure-Ref allow-clause that
+// authorises every resource in namespace (no cluster state needed). The GVK is an
+// optional gate (ignored when empty); a non-empty Namespace is required. It carries
+// neither a Name nor a Selector — both would be silently ignored — so use it (rather
+// than a struct literal) to keep the Dim/field combination consistent (see
+// ScopeClause.Validate).
+func NamespaceClause(gvk GVK, namespace string) ScopeClause {
+	return ScopeClause{Dim: DimNamespace, GVK: gvk, Namespace: namespace}
+}
+
+// OwnershipClause builds a DimOwnership scope clause rooted at root: a
+// state-dependent allow-clause covering root itself plus every resource transitively
+// owned by it (owner→child by uid, the same walk Closure cascades over). Identity
+// lives entirely on Root — the clause carries no GVK/Namespace/Name/Selector of its
+// own (all would be silently ignored) — so use it (rather than a struct literal) to
+// keep the Dim/field combination consistent (see ScopeClause.Validate).
+func OwnershipClause(root Ref) ScopeClause {
+	return ScopeClause{Dim: DimOwnership, Root: root}
+}
+
 // hasSelector reports whether the clause carries any selector requirement.
 func (c ScopeClause) hasSelector() bool {
 	return len(c.Selector.MatchLabels) > 0 || len(c.Selector.MatchExpressions) > 0
@@ -157,12 +180,22 @@ func (c ScopeClause) hasSelector() bool {
 // guard (parseScope calls it per clause) that turns a malformed or unknown-dimension
 // clause into a loud failure instead of silent misbehaviour:
 //
-//   - Dim must be one of "", DimResource, or DimSelector. An empty Dim is allowed
-//     (read as DimResource for v0.1/v0.2 back-compat); any other value (a typo, or a
-//     not-yet-implemented dimension) is rejected — fail-closed, not coerced.
+//   - Dim must be one of "", DimResource, DimSelector, DimNamespace or DimOwnership.
+//     An empty Dim is allowed (read as DimResource for v0.1/v0.2 back-compat); any
+//     other value (a typo, or a not-yet-implemented dimension) is rejected —
+//     fail-closed, not coerced.
 //   - A resource clause must NOT carry a Selector (the selector would be silently
-//     ignored, masking a clause that meant to be a selector clause).
-//   - A selector clause must NOT carry a Name (the Name would be silently ignored).
+//     ignored, masking a clause that meant to be a selector clause) or a Root (the
+//     ownership dimension owns Root; any other dimension would silently ignore it).
+//   - A selector clause must NOT carry a Name or a Root (both would be silently
+//     ignored).
+//   - A namespace clause must carry a non-empty Namespace (a "namespace" clause that
+//     names no namespace is malformed) and must NOT carry a Name, a Selector or a
+//     Root (all would be silently ignored).
+//   - An ownership clause's identity lives entirely on Root: Root must carry a
+//     GVK.Kind and a Name, and the clause must NOT carry a clause-level Name,
+//     Selector, GVK or Namespace (all would be silently ignored — the subtree is
+//     rooted at Root, not at the clause's own gate).
 //
 // An empty selector on a selector clause is NOT an error: an empty authorisation
 // selector is a deliberate match-nothing fail-safe (DESIGN §6), kept loadable.
@@ -172,12 +205,47 @@ func (c ScopeClause) Validate() error {
 		if c.hasSelector() {
 			return fmt.Errorf("scope clause %s/%s/%s: resource dimension must not carry a selector", c.GVK.Kind, c.Namespace, c.Name)
 		}
+		if c.Root != (Ref{}) {
+			return fmt.Errorf("scope clause %s/%s/%s: resource dimension must not carry a Root; the ownership dimension owns Root", c.GVK.Kind, c.Namespace, c.Name)
+		}
 	case DimSelector:
 		if c.Name != "" {
 			return fmt.Errorf("scope clause %s/%s: selector dimension must not carry a name (got %q)", c.GVK.Kind, c.Namespace, c.Name)
 		}
+		if c.Root != (Ref{}) {
+			return fmt.Errorf("scope clause %s/%s: selector dimension must not carry a Root; the ownership dimension owns Root", c.GVK.Kind, c.Namespace)
+		}
+	case DimNamespace:
+		if c.Namespace == "" {
+			return fmt.Errorf("scope clause %s: namespace dimension must carry a non-empty namespace", c.GVK.Kind)
+		}
+		if c.Name != "" {
+			return fmt.Errorf("scope clause %s/%s: namespace dimension must not carry a name (got %q)", c.GVK.Kind, c.Namespace, c.Name)
+		}
+		if c.hasSelector() {
+			return fmt.Errorf("scope clause %s/%s: namespace dimension must not carry a selector", c.GVK.Kind, c.Namespace)
+		}
+		if c.Root != (Ref{}) {
+			return fmt.Errorf("scope clause %s/%s: namespace dimension must not carry a Root; the ownership dimension owns Root", c.GVK.Kind, c.Namespace)
+		}
+	case DimOwnership:
+		if c.Root.GVK.Kind == "" || c.Root.Name == "" {
+			return fmt.Errorf("scope clause %s: ownership dimension requires a Root with a Kind and a Name", c.Root)
+		}
+		if c.Name != "" {
+			return fmt.Errorf("scope clause root %s: ownership dimension must not carry a clause-level name (got %q); identity lives on Root", c.Root, c.Name)
+		}
+		if c.hasSelector() {
+			return fmt.Errorf("scope clause root %s: ownership dimension must not carry a selector; identity lives on Root", c.Root)
+		}
+		if c.GVK != (GVK{}) {
+			return fmt.Errorf("scope clause root %s: ownership dimension must not carry a clause-level GVK; identity lives on Root", c.Root)
+		}
+		if c.Namespace != "" {
+			return fmt.Errorf("scope clause root %s: ownership dimension must not carry a clause-level namespace (got %q); identity lives on Root", c.Root, c.Namespace)
+		}
 	default:
-		return fmt.Errorf("scope clause %s/%s: unknown scope dimension %q (want %q, %q, or empty)", c.GVK.Kind, c.Namespace, c.Dim, DimResource, DimSelector)
+		return fmt.Errorf("scope clause %s/%s: unknown scope dimension %q (want %q, %q, %q, %q, or empty)", c.GVK.Kind, c.Namespace, c.Dim, DimResource, DimSelector, DimNamespace, DimOwnership)
 	}
 	return nil
 }

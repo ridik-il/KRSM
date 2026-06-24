@@ -1,0 +1,11 @@
+# NEGATIVE golden (fail-closed parse boundary, ADR-0010). An ownership clause's
+# identity may live ONLY on `root`. This clause is `dim: ownership` but also carries
+# conflicting clause-level identity (`kind`/`name`), which a correct parse would have
+# to either honour or silently drop. Silently dropping it would let a malformed
+# scope.yaml pass — so parseScope rejects any clause-level identity/selector field on
+# an ownership clause BEFORE constructing it. Load() must therefore fail closed.
+scope:
+  - dim: ownership
+    kind: ConfigMap
+    name: not-the-root
+    root: {group: apps, version: v1, kind: Deployment, namespace: prod, name: web}

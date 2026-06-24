@@ -1,0 +1,11 @@
+# Cascade-delete the `web` Deployment: the cascade pulls in its ReplicaSet and Pods;
+# the pods' Service binding then pulls in web-svc — a closure member the Deployment
+# does not own.
+verb: delete
+cascade: true
+target:
+  group: apps
+  version: v1
+  kind: Deployment
+  namespace: prod
+  name: web

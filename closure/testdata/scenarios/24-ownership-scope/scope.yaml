@@ -1,0 +1,7 @@
+# A single ownership-dim clause rooted at the `web` Deployment: it covers the
+# Deployment plus every resource it transitively owns (the ReplicaSet and both Pods),
+# computed by the same owner→child walk the closure cascades over. Identity lives on
+# `root`; the clause carries no clause-level GVK/namespace/name/selector.
+scope:
+  - dim: ownership
+    root: {group: apps, version: v1, kind: Deployment, namespace: prod, name: web}

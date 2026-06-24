@@ -1,0 +1,56 @@
+# The scenario-01 topology with NO declared scope: a Deployment owns a ReplicaSet
+# that owns two Pods, and a Service selects those pods (app=web). With no scope.yaml
+# and no taskcontract.yaml, KRSM derives a Level-0 ownership scope rooted at the
+# request target (the `web` Deployment). The cascade delete's closure pulls in the
+# owned subtree (Deployment/ReplicaSet/Pods) AND the Service via the pod→selector
+# binding — but the Deployment does NOT own the Service, so it falls OUTSIDE the
+# derived ownership tree and escapes → Block. This is the zero-config "aha": the
+# derived default flags the broken Service with no contract written.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-rs
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: Deployment, name: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: ReplicaSet, name: web-rs}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-2
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: ReplicaSet, name: web-rs}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc
+  namespace: prod
+spec:
+  selector: {app: web}

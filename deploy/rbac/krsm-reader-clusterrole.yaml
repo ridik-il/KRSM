@@ -1,0 +1,94 @@
+# KRSM live-cluster-reads RBAC (v0.4, slice 2).
+#
+# KRSM is a fail-closed PRE-EXECUTION safety gate: it reads live cluster state to
+# compute an action's affected-resource closure, then decides whether that closure
+# stays within an authorised scope. It is READ-ONLY — it never mutates the cluster.
+#
+# Security posture (securing-kubernetes-on-cloud, Step 4 — least privilege):
+#   - Verbs are the explicit read set get/list/watch ONLY. There is NO wildcard verb
+#     ("*") anywhere; a write verb (create/update/patch/delete/deletecollection) would
+#     contradict the read-only guarantee enforced in internal/cluster (the Reader uses
+#     only the dynamic List call, guarded by TestReaderUsesOnlyReadVerbs and
+#     TestPackageInvokesNoWriteVerbs).
+#   - Resources are the broad-but-explicit set the four KRSM relations traverse (plan
+#     decision 4: under-scoping is unsafe, over-inclusion is merely conservative). The
+#     Reader intersects this with live discovery and fails closed on any kind it cannot
+#     list, so a missing grant denies the whole check rather than silently shrinking the
+#     closure.
+#   - It is a ClusterRole because the reader lists cluster-wide (a Namespace delete's
+#     blast radius is not confined to one namespace); scope it down to a Role per
+#     namespace if a deployment only ever checks within one namespace.
+#
+# Discovered CRDs that participate via ownerReferences also need read access; add their
+# (apiGroup, resource) here, or grant a read-only view of the relevant custom groups.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: krsm-reader
+  labels:
+    app.kubernetes.io/name: krsm
+    app.kubernetes.io/component: cluster-reader
+rules:
+  # Core group: pods, services, configmaps, secrets, PVCs, namespaces.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  # Workloads.
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  # Disruption budgets.
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch"]
+  # Network policies.
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  # Horizontal pod autoscalers.
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+  # Discovery: KRSM lists resource kinds and their namespaced/cluster scope from the
+  # discovery API. apiGroups "" + "apiextensions.k8s.io" cover the built-in discovery
+  # surface and CRD definitions; no write verb.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["get", "list", "watch"]
+---
+# Bind the reader role to the service account KRSM runs as. Adjust the subject to your
+# deployment's identity (a dedicated ServiceAccount is recommended over a user/group).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: krsm-reader
+  labels:
+    app.kubernetes.io/name: krsm
+    app.kubernetes.io/component: cluster-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: krsm-reader
+subjects:
+  - kind: ServiceAccount
+    name: krsm
+    namespace: krsm-system

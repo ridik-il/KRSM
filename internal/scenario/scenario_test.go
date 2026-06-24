@@ -96,6 +96,64 @@ func TestParseScopeRejectsUnknownDim(t *testing.T) {
 	}
 }
 
+// TestParseScopeOwnershipClause: a scope clause with `dim: ownership` and a `root`
+// sub-object parses into a DimOwnership ScopeClause whose Root carries the resolved
+// synthetic uid (built by uidOf exactly as the action target is), so ownedSubtree
+// membership matches by uid like the closure does. The clause carries no clause-level
+// GVK/Namespace/Name (identity lives on Root) and passes Validate.
+func TestParseScopeOwnershipClause(t *testing.T) {
+	raw := []byte("scope:\n" +
+		"  - dim: ownership\n" +
+		"    root: {group: apps, version: v1, kind: Deployment, namespace: prod, name: web}\n")
+
+	got, err := parseScope(raw)
+	if err != nil {
+		t.Fatalf("parseScope: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d clauses, want 1", len(got))
+	}
+	c := got[0]
+	if c.Dim != closure.DimOwnership {
+		t.Errorf("clause.Dim = %q, want %q", c.Dim, closure.DimOwnership)
+	}
+	wantUID := uidOf("Deployment", "prod", "web")
+	if c.Root.GVK.Kind != "Deployment" || c.Root.Namespace != "prod" || c.Root.Name != "web" || c.Root.UID != wantUID {
+		t.Errorf("root = %+v (uid %q), want Deployment/prod/web with uid %q", c.Root, c.Root.UID, wantUID)
+	}
+	if c.GVK != (closure.GVK{}) || c.Namespace != "" || c.Name != "" {
+		t.Errorf("clause carries clause-level identity %+v; ownership identity must live on Root only", c)
+	}
+}
+
+// TestParseScopeNonOwnershipRejectsRoot: a non-ownership clause (dim: resource,
+// selector, or namespace) must not carry a `root` — that field is meaningful only for
+// dim: ownership. The non-ownership parse branch used to ignore rc.Root, silently
+// dropping it; since ScopeClause.Validate now treats a stray Root as a hard error, the
+// loader must reject it at the parse boundary (fail-closed, ADR-0010) with a clear
+// error rather than build a clause whose Root is lost.
+func TestParseScopeNonOwnershipRejectsRoot(t *testing.T) {
+	raw := []byte("scope:\n" +
+		"  - dim: resource\n" +
+		"    kind: Pod\n" +
+		"    namespace: prod\n" +
+		"    name: web-1\n" +
+		"    root: {group: apps, version: v1, kind: Deployment, namespace: prod, name: web}\n")
+
+	if _, err := parseScope(raw); err == nil {
+		t.Fatal("parseScope(dim: resource with a root) = nil error, want rejection of the stray root")
+	}
+}
+
+// TestParseScopeOwnershipMissingRoot: a `dim: ownership` clause with no `root`
+// fails loudly at load rather than building a malformed (empty-Root) clause.
+func TestParseScopeOwnershipMissingRoot(t *testing.T) {
+	raw := []byte("scope:\n  - dim: ownership\n")
+	if _, err := parseScope(raw); err == nil {
+		t.Fatal("parseScope(dim: ownership without root) = nil error, want rejection")
+	}
+}
+
 // TestParseScopeSelectorClause: a scope clause with `dim: selector` and
 // matchExpressions parses into a DimSelector ScopeClause carrying the populated
 // LabelSelector (gated by the clause's GVK/namespace), built by the same selector

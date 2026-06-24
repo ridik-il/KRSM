@@ -59,6 +59,51 @@ func TestCompileResourceAndSelectorClauses(t *testing.T) {
 	}
 }
 
+// Test 1b: Compile stamps ProvenanceContract on its result — the verdict report can
+// distinguish a declared scope from a derived one (ADR-0011).
+func TestCompileSetsContractProvenance(t *testing.T) {
+	tc := scope.TaskContract{
+		APIVersion: "krsm.io/v1",
+		Kind:       "TaskContract",
+		Spec:       scope.Spec{Allow: nil},
+	}
+	pred, err := scope.Compile(tc)
+	if err != nil {
+		t.Fatalf("Compile: unexpected error: %v", err)
+	}
+	if pred.Provenance != scope.ProvenanceContract {
+		t.Errorf("Provenance = %q, want %q", pred.Provenance, scope.ProvenanceContract)
+	}
+}
+
+// TestDerive: the Level-0 synthesizer returns exactly one ownership clause rooted at
+// the target — the target plus everything it owns — and NO namespace clause (a
+// namespace allow-clause would re-admit same-namespace collateral under the union
+// semantics of C ⊆ scope; ADR-0011). Provenance records the derivation.
+func TestDerive(t *testing.T) {
+	target := closure.Ref{
+		GVK:       closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"},
+		Namespace: "prod",
+		Name:      "web",
+		UID:       "uid:Deployment/prod/web",
+	}
+
+	pred := scope.Derive(target)
+
+	want := []closure.ScopeClause{closure.OwnershipClause(target)}
+	if !reflect.DeepEqual(pred.Clauses, want) {
+		t.Errorf("Clauses mismatch\n got: %#v\nwant: %#v", pred.Clauses, want)
+	}
+	if pred.Provenance != scope.ProvenanceDerivedOwner {
+		t.Errorf("Provenance = %q, want %q", pred.Provenance, scope.ProvenanceDerivedOwner)
+	}
+	for _, c := range pred.Clauses {
+		if c.Dim == closure.DimNamespace {
+			t.Errorf("derived scope must not carry a namespace clause; got %#v", c)
+		}
+	}
+}
+
 // Test 2: an unsupported/unknown dimension (a valid-future-syntax but unbuilt
 // dim like ownership) is a hard compile error — fail closed, not a silent skip
 // that would yield a narrowed scope.

@@ -1,0 +1,17 @@
+# Expected verdict for the derived Level-0 default (no scope.yaml, no taskcontract.yaml).
+# The loader synthesizes scope.Derive(target) → a single ownership clause rooted at the
+# `web` Deployment. The closure is the Deployment, its ReplicaSet, both Pods AND the
+# Service (the pod→selector binding). The derived ownership tree covers the owned
+# subtree (Deployment/ReplicaSet/Pods), so they are in scope — but the Service is not
+# owned by the Deployment, so it escapes → Block. Identical verdict to the explicit
+# ownership-scope golden (25), now proven end-to-end through derivation.
+verdict: Block
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: ReplicaSet, namespace: prod, name: web-rs}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+  - {kind: Service, namespace: prod, name: web-svc}
+escaping:
+  - {kind: Service, namespace: prod, name: web-svc}
+external: []

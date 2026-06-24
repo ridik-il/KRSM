@@ -1,0 +1,11 @@
+# Cascade-delete the `web` Deployment (same request as scenario 24). The request is
+# well-formed; Load never reaches the verdict because parseScope rejects the malformed
+# ownership clause first.
+verb: delete
+cascade: true
+target:
+  group: apps
+  version: v1
+  kind: Deployment
+  namespace: prod
+  name: web

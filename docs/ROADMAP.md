@@ -57,6 +57,17 @@ it **useful with zero contracts** (ADR-0011: progressive, derived scope).
 action with no manual snapshot, **and** flags an escaping action under the derived
 default scope with no contract written.
 
+**Status: shipped (kind milestone).** Both halves done — derived default scope
+(`docs/plans/v0.4-derived-scope.md`) and live-cluster reads (all 5 slices,
+`docs/plans/v0.4-live-cluster-reads.md`), proven end-to-end by `internal/e2e` on a real
+`kind` cluster. A critical real-world review (PR #11) found the **one-shot live reader is
+the kind milestone, not yet production-grade**: partial-discovery-fatal (C1),
+non-atomic-snapshot (C2), unbounded/secret-data reads (C3), no timeout (S1), group-blind
+target resolution (S2), multi-version double-list (S3), hardcoded cascade (S4). These are
+not milestone blockers (v0.4's scope was "kind, one-shot, fail-closed") but are **v0.5
+entry criteria** — resolved by the informer-backed indexed state path the webhook needs
+anyway. Tracked in `docs/plans/v0.5-admission-webhook.md` (§"v0.4 real-world gaps").
+
 ## v0.5 — The admission webhook (audit-first)
 
 The actual product: flag/deny escaping actions before they persist — adoption-friendly

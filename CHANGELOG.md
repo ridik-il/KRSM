@@ -6,6 +6,110 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-24
+
+### Added
+- **Derived default scope — Level 0 (ADR-0011, ROADMAP v0.4).** `krsm check <dir>` now
+  returns a verdict with **no `scope.yaml` and no `taskcontract.yaml`**. The loader
+  synthesizes a conservative scope from the request target via a new, pure, stdlib-only
+  `scope.Derive(target) ScopePredicate` — a single `ownership`-dimension clause rooted
+  at the target (the target plus everything it transitively owns), deliberately *not*
+  OR'd with a namespace clause (under the union semantics of `C ⊆ scope` a namespace
+  clause would re-admit the same-namespace collateral the tree is meant to flag, and it
+  is redundant since anything cross-namespace is already outside the tree). This catches
+  the flagship intra-namespace cascade with zero declared scope: the broken Service is
+  in the closure but is not owned by the Deployment, so it escapes the derived tree. New
+  golden `26-derived-default` pins this zero-config verdict.
+- **Two new scope dimensions** (DESIGN §6; the ADR-0008/0009 deferral pulled forward by
+  ADR-0011):
+  - `dim: namespace` (`closure.DimNamespace` / `closure.NamespaceClause(gvk, ns)`) —
+    every candidate in a namespace, with an optional GVK gate; a pure-`Ref` match (no
+    state). New golden `23-namespace-scope`.
+  - `dim: ownership` (`closure.DimOwnership` / `closure.OwnershipClause(root)`) — a root
+    plus its transitive owned subtree; **state-dependent**, computed by the *same*
+    `State.OwnedChildren` owner→child walk `closure.Closure` uses, so scope-ownership and
+    closure-ownership agree by construction (visited-set guarded, `|subtree| ≤ |R|`,
+    cycle-safe, memoized per root). New goldens `24-ownership-scope` (the cascade is in
+    scope) and `25-ownership-escape` (a non-owned member escapes).
+  - `closure.ScopeClause` gains a `Root Ref` field (ownership only) and `Validate`
+    extends to the two dimensions (each clause carries only its own fields; a stray
+    field is a hard error at load).
+- **Scope provenance.** `scope.ScopePredicate` gains `Provenance`
+  (`contract` | `derived:ownership-tree`): `Compile` stamps `ProvenanceContract`,
+  `Derive` stamps `ProvenanceDerivedOwner`. The `krsm check` SCOPE line now reports the
+  scope's source (`scope.yaml`, `taskcontract.yaml`, or `derived (ownership-tree)`) and
+  renders the new dimensions readably (`ns:prod/*`, `owns:Deployment.apps/prod/web`).
+- **Audit/enforce verdict mode (ADR-0011 audit-first default).** `scope.Mode`
+  (`ModeAudit` default / `ModeEnforce`) with `Mode.Apply(closure.Decision) closure.Decision`,
+  applied *above* the unchanged `closure.Safe`. In audit a **scope-escape** Block
+  (`len(Escaping) > 0`) is downgraded to `Warn` — exit `0`, with the escaping set still
+  printed so the operator sees what *would* block — while a **fail-closed** Block (empty
+  `Escaping`: closure uncomputable, DESIGN §5) is *not* softened. `krsm check` gains
+  `--mode audit|enforce` (default `audit`); the exit status acts on the *applied* verdict.
+- **Live-cluster reads (ROADMAP v0.4, the motivating milestone).** `krsm check` can now
+  compute the closure against a **real cluster, read-only** — no hand-written
+  `cluster.yaml`. New invocation
+  `krsm check [--context X] [--kubeconfig P] [--mode audit|enforce] <verb> <Kind/name> [-n ns]`
+  resolves a `*rest.Config` through standard client-go rules (flags override
+  `$KUBECONFIG` / `~/.kube/config` / current-context), reads the relevant GVKs read-only,
+  derives the Level-0 ownership scope when none is declared, and runs the **shared**
+  `closure.Safe` / `mode.Apply` / report. A positional directory still selects the offline
+  scenario path (unchanged).
+- **New internal `cluster` package** — a pure
+  `BuildObjects([]unstructured.Unstructured, ScopeInfo) ([]closure.Object, error)`
+  projection that extracts the four relations from live `unstructured` objects using the
+  **same field paths** as the YAML loader, but with **real** `metadata.uid` /
+  `ownerReferences` uids (no synthesis) and a name→uid index resolving cross-references;
+  plus a read-only `Reader` (discovery + dynamic client) and a discovery-backed `ScopeInfo`
+  that **replaces the loader's static cluster-scoped-kinds map** with live discovery. A
+  parity oracle drives the golden corpus through `BuildObjects`, so the live verdict
+  matches the offline goldens by construction.
+- **Read-only by construction.** The live reader issues only `list` (never
+  create/update/patch/delete/apply) — enforced by both a runtime action-tracker assertion
+  and a static source-guard test, so a future write call site fails the build. New
+  `deploy/rbac/krsm-reader-clusterrole.yaml` ships a least-privilege `get`/`list`/`watch`-only
+  `ClusterRole` (no wildcard verb, no write verb) + binding.
+- **Distinct fail-closed deny reasons on the live path** — an unresolvable target, an
+  unreadable/forbidden kind, and a discovery failure each deny the *whole* check with an
+  operator-legible reason; a partial read is an unknown closure (DESIGN §5) and is denied,
+  never silently shrunk into a smaller verdict.
+- **`kind` acceptance test + `make e2e`.** A `//go:build cluster` end-to-end test (excluded
+  from the default `make check` / CI gate) stands up a real `kind` cluster, applies a
+  scenario-`01`-equivalent fixture with **no `cluster.yaml` and no contract**, and proves
+  the ROADMAP v0.4 "Done when": the derived-default escape is **flagged** and the in-scope
+  action **allowed**.
+- **First Kubernetes client dependency.** `k8s.io/client-go` + `k8s.io/apimachinery`
+  (v0.34.x) enter `go.mod`, confined to `internal/cluster` + `cmd/krsm` — the embeddable
+  `closure` / `scope` packages stay **stdlib-only** (guarded by `internal/archguard`).
+  Resolving a client-go-reachable `golang.org/x/net` advisory by **bumping** (never
+  suppressing) raised `x/net` → v0.56.0, which requires **go 1.25.0** — so the go directive
+  moved 1.24 → 1.25.0. `govulncheck` reports no vulnerabilities.
+
+### Changed
+- **`krsm check` default verdict mode is now `audit`.** A scope-escape that previously
+  exited `2` (Block) now exits `0` (a Warn, with the escaping detail shown) unless
+  `--mode enforce` is passed — the Falco/Kyverno adoption lesson (ADR-0011), so a day-0
+  false positive does not get KRSM uninstalled. Pass `--mode enforce` for the prior
+  block-and-exit-`2` behaviour.
+- **Internal (`closure`, non-breaking):** `matchScope`'s label-lookup seam widened from
+  a bare `labelsOf` function to a narrow unexported `scopeResolver` interface (`labels` +
+  memoized `ownedSubtree`), built by `Safe` from the `State` it already holds — room for
+  the future `reference` dimension without accumulating positional functions.
+  `closure.Safe`'s public signature and the closure walk are unchanged; `archguard`
+  confirms `closure` and `scope` stay stdlib-only; all existing goldens are unchanged
+  (corpus now 27 scenarios, 22 prior + 23–27).
+
+### Known limitations
+- **v0.4 is the `kind` milestone, not yet production-grade.** The live reader is a
+  one-shot, whole-cluster list. A critical real-world review found gaps that surface on a
+  production cluster and are resolved in v0.5 (the informer-backed admission webhook):
+  partial discovery treated as fatal (#12), a non-atomic snapshot that can miss collateral
+  (#13), unbounded reads that pull every Secret's data into memory (#14), no request
+  timeout (#15), group-blind CLI target resolution (#16), multi-version double-listing
+  (#17), and a hardcoded delete cascade that ignores `propagationPolicy` (#18). Use
+  `krsm check` against a real cluster with this understanding; do not gate a production
+  cluster on it yet. See `docs/plans/v0.5-admission-webhook.md`.
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
@@ -129,7 +233,8 @@ All notable changes to this project are documented here. The format follows
 - The failure-mode scenario corpus as golden tests under
   `closure/testdata/scenarios/`.
 
-[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ridik-il/krsm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ridik-il/krsm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ridik-il/krsm/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ridik-il/krsm/releases/tag/v0.1.0

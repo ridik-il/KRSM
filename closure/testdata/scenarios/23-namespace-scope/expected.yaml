@@ -1,0 +1,13 @@
+# The closure is the Deployment, its ReplicaSet and both Pods — all in `prod`. The
+# namespace-dim clause authorises every resource in `prod`, so each closure member
+# passes the gate and is in scope; nothing escapes and there is no cross-boundary
+# effect → Allow. This is the end-to-end proof that a `dim: namespace` clause covers
+# a whole-namespace closure without enumerating names or labels.
+verdict: Allow
+closure:
+  - {kind: Deployment, namespace: prod, name: web}
+  - {kind: ReplicaSet, namespace: prod, name: web-rs}
+  - {kind: Pod, namespace: prod, name: web-1}
+  - {kind: Pod, namespace: prod, name: web-2}
+escaping: []
+external: []

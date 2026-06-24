@@ -1,0 +1,43 @@
+# The same single ownership tree as scenario 24 (Deployment owns ReplicaSet owns two
+# Pods). The cluster is well-formed; it is the scope.yaml that is malformed, so the
+# failure is purely a fail-closed parse rejection, not a closure/state problem.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels: {app: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-rs
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: Deployment, name: web}
+spec:
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: ReplicaSet, name: web-rs}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-2
+  namespace: prod
+  labels: {app: web}
+  ownerReferences:
+    - {kind: ReplicaSet, name: web-rs}

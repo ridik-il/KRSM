@@ -39,6 +39,10 @@ staticcheck: ## Run staticcheck (must be installed)
 .PHONY: check
 check: fmt vet lint staticcheck test ## The full local gate — mirrors CI (fmt, vet, lint, staticcheck, race tests)
 
+.PHONY: e2e
+e2e: build ## Run the kind acceptance test (needs kind + kubectl + docker; NOT in check/CI)
+	go test -tags cluster -count=1 -v -timeout 15m ./internal/e2e/...
+
 .PHONY: snapshot
 snapshot: ## Build a local release snapshot into dist/ (no publish/sign; needs goreleaser)
 	goreleaser release --snapshot --clean
