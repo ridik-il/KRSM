@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-24
+
 ### Added
 - **Derived default scope — Level 0 (ADR-0011, ROADMAP v0.4).** `krsm check <dir>` now
   returns a verdict with **no `scope.yaml` and no `taskcontract.yaml`**. The loader
@@ -44,6 +46,44 @@ All notable changes to this project are documented here. The format follows
   printed so the operator sees what *would* block — while a **fail-closed** Block (empty
   `Escaping`: closure uncomputable, DESIGN §5) is *not* softened. `krsm check` gains
   `--mode audit|enforce` (default `audit`); the exit status acts on the *applied* verdict.
+- **Live-cluster reads (ROADMAP v0.4, the motivating milestone).** `krsm check` can now
+  compute the closure against a **real cluster, read-only** — no hand-written
+  `cluster.yaml`. New invocation
+  `krsm check [--context X] [--kubeconfig P] [--mode audit|enforce] <verb> <Kind/name> [-n ns]`
+  resolves a `*rest.Config` through standard client-go rules (flags override
+  `$KUBECONFIG` / `~/.kube/config` / current-context), reads the relevant GVKs read-only,
+  derives the Level-0 ownership scope when none is declared, and runs the **shared**
+  `closure.Safe` / `mode.Apply` / report. A positional directory still selects the offline
+  scenario path (unchanged).
+- **New internal `cluster` package** — a pure
+  `BuildObjects([]unstructured.Unstructured, ScopeInfo) ([]closure.Object, error)`
+  projection that extracts the four relations from live `unstructured` objects using the
+  **same field paths** as the YAML loader, but with **real** `metadata.uid` /
+  `ownerReferences` uids (no synthesis) and a name→uid index resolving cross-references;
+  plus a read-only `Reader` (discovery + dynamic client) and a discovery-backed `ScopeInfo`
+  that **replaces the loader's static cluster-scoped-kinds map** with live discovery. A
+  parity oracle drives the golden corpus through `BuildObjects`, so the live verdict
+  matches the offline goldens by construction.
+- **Read-only by construction.** The live reader issues only `list` (never
+  create/update/patch/delete/apply) — enforced by both a runtime action-tracker assertion
+  and a static source-guard test, so a future write call site fails the build. New
+  `deploy/rbac/krsm-reader-clusterrole.yaml` ships a least-privilege `get`/`list`/`watch`-only
+  `ClusterRole` (no wildcard verb, no write verb) + binding.
+- **Distinct fail-closed deny reasons on the live path** — an unresolvable target, an
+  unreadable/forbidden kind, and a discovery failure each deny the *whole* check with an
+  operator-legible reason; a partial read is an unknown closure (DESIGN §5) and is denied,
+  never silently shrunk into a smaller verdict.
+- **`kind` acceptance test + `make e2e`.** A `//go:build cluster` end-to-end test (excluded
+  from the default `make check` / CI gate) stands up a real `kind` cluster, applies a
+  scenario-`01`-equivalent fixture with **no `cluster.yaml` and no contract**, and proves
+  the ROADMAP v0.4 "Done when": the derived-default escape is **flagged** and the in-scope
+  action **allowed**.
+- **First Kubernetes client dependency.** `k8s.io/client-go` + `k8s.io/apimachinery`
+  (v0.34.x) enter `go.mod`, confined to `internal/cluster` + `cmd/krsm` — the embeddable
+  `closure` / `scope` packages stay **stdlib-only** (guarded by `internal/archguard`).
+  Resolving a client-go-reachable `golang.org/x/net` advisory by **bumping** (never
+  suppressing) raised `x/net` → v0.56.0, which requires **go 1.25.0** — so the go directive
+  moved 1.24 → 1.25.0. `govulncheck` reports no vulnerabilities.
 
 ### Changed
 - **`krsm check` default verdict mode is now `audit`.** A scope-escape that previously
@@ -58,6 +98,17 @@ All notable changes to this project are documented here. The format follows
   `closure.Safe`'s public signature and the closure walk are unchanged; `archguard`
   confirms `closure` and `scope` stay stdlib-only; all existing goldens are unchanged
   (corpus now 27 scenarios, 22 prior + 23–27).
+
+### Known limitations
+- **v0.4 is the `kind` milestone, not yet production-grade.** The live reader is a
+  one-shot, whole-cluster list. A critical real-world review found gaps that surface on a
+  production cluster and are resolved in v0.5 (the informer-backed admission webhook):
+  partial discovery treated as fatal (#12), a non-atomic snapshot that can miss collateral
+  (#13), unbounded reads that pull every Secret's data into memory (#14), no request
+  timeout (#15), group-blind CLI target resolution (#16), multi-version double-listing
+  (#17), and a hardcoded delete cascade that ignores `propagationPolicy` (#18). Use
+  `krsm check` against a real cluster with this understanding; do not gate a production
+  cluster on it yet. See `docs/plans/v0.5-admission-webhook.md`.
 
 ## [0.3.0] - 2026-06-22
 
@@ -182,7 +233,8 @@ All notable changes to this project are documented here. The format follows
 - The failure-mode scenario corpus as golden tests under
   `closure/testdata/scenarios/`.
 
-[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ridik-il/krsm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ridik-il/krsm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ridik-il/krsm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ridik-il/krsm/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ridik-il/krsm/releases/tag/v0.1.0

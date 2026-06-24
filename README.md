@@ -101,6 +101,30 @@ See **[docs/DESIGN.md](docs/DESIGN.md)** for the full architecture and **[docs/R
 
 KRSM is also the artifact of an ongoing **Doctor of Engineering Sciences** thesis — *Formal Task-Scoped Safety for Autonomous Cloud Infrastructure Agents: A Theory of Affected-Resource Closure*. The theory proves that purely syntactic admission control has an irreducible false-negative floor on this class of actions, and that closure over live relations is computable and decidable within a stated boundary. The code is the engineering contribution; the proofs and benchmark are the scientific one. (Research planning lives outside this repo; this repo is the tool.)
 
+## Try it (v0.4 — the CLI, the `kind` milestone)
+
+```sh
+make build            # -> bin/krsm   (or: go install github.com/ridik-il/krsm/cmd/krsm@latest)
+
+# offline: check a scenario directory (cluster.yaml + request.yaml [+ scope/contract])
+bin/krsm check closure/testdata/scenarios/01-memory-pressure-cascade
+
+# live: check a real cluster read-only — no cluster.yaml needed
+bin/krsm check --context kind-krsm delete Deployment/web -n prod
+```
+
+`krsm check` derives a Level-0 ownership-tree scope when none is declared, prints the
+`ACTION / SCOPE / CLOSURE / VERDICT` report, and in the default `audit` mode **flags**
+(rather than blocks) a scope escape; pass `--mode enforce` to block (exit `2`). The live
+read is strictly read-only (`get`/`list`/`watch`) — see
+[`deploy/rbac/krsm-reader-clusterrole.yaml`](deploy/rbac/krsm-reader-clusterrole.yaml).
+
+> **v0.4 is the `kind` milestone, not yet production-grade.** The live reader is a one-shot
+> read with known real-world gaps tracked for the v0.5 admission webhook (issues #12–#18:
+> partial-discovery handling, snapshot consistency, bounded/secret-safe reads, timeouts).
+> Don't gate a production cluster on it yet. The validating-webhook deployment sketched
+> in *How it works* lands in **v0.5**.
+
 ## Project status & roadmap
 
 Building in vertical slices, each shippable on its own — see **[ROADMAP](docs/ROADMAP.md)**:
