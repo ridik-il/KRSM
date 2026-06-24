@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/ridik-il/krsm/closure"
-	"github.com/ridik-il/krsm/internal/scenario"
 )
 
 func scenarioDir(name string) string {
@@ -46,7 +46,8 @@ func TestCheckSelectorScenarioAllows(t *testing.T) {
 // stderr), consistent with how the pure-Warn branch surfaces External detail.
 func TestWriteReportAuditDowngradeRendersExternal(t *testing.T) {
 	var out, errOut bytes.Buffer
-	sc := &scenario.Scenario{ScopeSource: "derived (ownership-tree)"}
+	action := closure.Action{Verb: closure.Delete, Target: closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web"}}
+	clauses := []closure.ScopeClause{closure.OwnershipClause(action.Target)}
 	dec := closure.Decision{
 		Verdict: closure.Warn,
 		Reason:  "affected-resource closure escapes task scope (audit: downgraded from BLOCK)",
@@ -57,13 +58,279 @@ func TestWriteReportAuditDowngradeRendersExternal(t *testing.T) {
 			{GVK: closure.GVK{Kind: "External"}, Namespace: "prod", Name: "example.com/external-lb"},
 		},
 	}
-	writeReport(&out, &errOut, sc, dec, true)
+	writeReport(&out, &errOut, action, clauses, "derived (ownership-tree)", dec, true)
 	combined := out.String() + errOut.String()
 	if !strings.Contains(combined, "Service/prod/web-svc") {
 		t.Errorf("audit-downgrade report dropped the escaping ref; got stdout:\n%s\nstderr:\n%s", out.String(), errOut.String())
 	}
 	if !strings.Contains(combined, "External/prod/example.com/external-lb") {
 		t.Errorf("audit-downgrade report dropped the External (cross-boundary) ref; got stdout:\n%s\nstderr:\n%s", out.String(), errOut.String())
+	}
+}
+
+// TestParseActionDeleteCascade: parseAction turns a verb + already-split canonical
+// Kind + name + namespace into a closure.Action with the verb, a Ref carrying the
+// canonical Kind/ns/name (no UID — resolved later by the live State), and Cascade=true
+// defaulted for delete (mirroring scenario.parseAction). The target split happens once
+// in runCheckLive (see splitTarget), so parseAction takes the pieces, not "Kind/name".
+func TestParseActionDeleteCascade(t *testing.T) {
+	a, err := parseAction("delete", "Deployment", "web", "prod")
+	if err != nil {
+		t.Fatalf("parseAction(delete Deployment web -n prod) = %v, want nil", err)
+	}
+	if a.Verb != closure.Delete {
+		t.Errorf("Verb = %q, want %q", a.Verb, closure.Delete)
+	}
+	if a.Target.GVK.Kind != "Deployment" || a.Target.Namespace != "prod" || a.Target.Name != "web" {
+		t.Errorf("Target = %+v, want Deployment/prod/web", a.Target)
+	}
+	if a.Target.UID != "" {
+		t.Errorf("Target.UID = %q, want empty (the live State resolves it by Kind/ns/name)", a.Target.UID)
+	}
+	if !a.Cascade {
+		t.Errorf("Cascade = false, want true (a delete defaults to cascading)")
+	}
+}
+
+// TestParseActionRejectsVerbs: unsupported verbs fail at the parse boundary rather
+// than run a misread action. A mutation verb (update/patch) is rejected with a message
+// naming the deferral (open Q4), distinct from an unknown verb.
+func TestParseActionRejectsVerbs(t *testing.T) {
+	cases := []struct {
+		name, verb, wantSubstr string
+	}{
+		{"unknown verb", "frobnicate", "unknown verb"},
+		{"mutation verb update", "update", "mutation"},
+		{"mutation verb patch", "patch", "mutation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseAction(tc.verb, "Deployment", "web", "prod")
+			if err == nil {
+				t.Fatalf("parseAction(%q) = nil error, want one mentioning %q", tc.verb, tc.wantSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("parseAction error = %q, want substring %q", err.Error(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestExtractNamespace: the kubectl-style trailing `-n` parser takes a normal value,
+// errors on a bare trailing `-n` (no value), and — the hardening — errors when the
+// value it would consume looks like a Kind/name target (contains "/"), rather than
+// silently swallowing a misplaced target as the namespace.
+func TestExtractNamespace(t *testing.T) {
+	t.Run("normal -n ns", func(t *testing.T) {
+		positional, ns, err := extractNamespace([]string{"delete", "Deployment/web", "-n", "prod"})
+		if err != nil {
+			t.Fatalf("extractNamespace = %v, want nil", err)
+		}
+		if ns != "prod" {
+			t.Errorf("namespace = %q, want prod", ns)
+		}
+		if len(positional) != 2 || positional[0] != "delete" || positional[1] != "Deployment/web" {
+			t.Errorf("positional = %v, want [delete Deployment/web]", positional)
+		}
+	})
+	t.Run("bare trailing -n errors", func(t *testing.T) {
+		if _, _, err := extractNamespace([]string{"delete", "Deployment/web", "-n"}); err == nil {
+			t.Fatal("extractNamespace(bare -n) = nil error, want a missing-value error")
+		}
+	})
+	t.Run("-n consuming a slash-bearing target errors", func(t *testing.T) {
+		_, _, err := extractNamespace([]string{"delete", "-n", "Deployment/web"})
+		if err == nil {
+			t.Fatal("extractNamespace(-n Deployment/web) = nil error, want a looks-like-target error")
+		}
+		if !strings.Contains(err.Error(), "looks like") {
+			t.Errorf("error = %q, want one mentioning the namespace looks like a target", err.Error())
+		}
+	})
+}
+
+// TestSplitTargetRejects: the single <Kind>/<name> split (done ONCE in runCheckLive)
+// rejects a missing slash, an empty kind, or an empty name with a clear "invalid
+// target" usage error, so a malformed target never reaches kind resolution or the
+// engine. This is the one place the target form is validated (no duplicate re-check).
+func TestSplitTargetRejects(t *testing.T) {
+	for _, target := range []string{"Deployment", "Deployment/", "/web", ""} {
+		if _, _, err := splitTarget(target); err == nil {
+			t.Errorf("splitTarget(%q) = nil error, want an invalid-target error", target)
+		}
+	}
+	kind, name, err := splitTarget("Deployment/web")
+	if err != nil {
+		t.Fatalf("splitTarget(Deployment/web) = %v, want nil", err)
+	}
+	if kind != "Deployment" || name != "web" {
+		t.Errorf("splitTarget(Deployment/web) = (%q, %q), want (Deployment, web)", kind, name)
+	}
+}
+
+// fakeLiveReader is a hermetic stand-in for cluster.Reader: it returns a prebuilt
+// closure.State and a canonical Kind, so the live CLI path can be exercised end-to-end
+// with no cluster. stateErr/kindErr model the slice-4 fail-closed inputs.
+type fakeLiveReader struct {
+	state    closure.State
+	kind     string
+	stateErr error
+	kindErr  error
+}
+
+func (f *fakeLiveReader) State(context.Context) (closure.State, error) {
+	return f.state, f.stateErr
+}
+
+func (f *fakeLiveReader) ResolveKind(_ context.Context, token string) (string, error) {
+	if f.kindErr != nil {
+		return "", f.kindErr
+	}
+	if f.kind != "" {
+		return f.kind, nil
+	}
+	return token, nil
+}
+
+// withFakeLiveReader swaps the live-reader constructor for one returning fr, so a
+// test drives the live path without a *rest.Config or a cluster. It restores the
+// original on cleanup.
+func withFakeLiveReader(t *testing.T, fr *fakeLiveReader) {
+	t.Helper()
+	orig := newLiveReader
+	newLiveReader = func(_, _ string) (liveReader, error) { return fr, nil }
+	t.Cleanup(func() { newLiveReader = orig })
+}
+
+// liveState builds a State equivalent to scenario 01's intra-namespace cascade:
+// a Deployment owning a ReplicaSet owning two Pods, plus an un-owned Service. A
+// cascading delete of the Deployment escapes the derived ownership tree via the
+// Service (and the State has no UID-less ambiguity because every object has a uid).
+func liveStateScenario01() closure.State {
+	dep := closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web", UID: "uid-dep"}
+	rs := closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "ReplicaSet"}, Namespace: "prod", Name: "web-rs", UID: "uid-rs"}
+	pod1 := closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespace: "prod", Name: "web-1", UID: "uid-p1"}
+	svc := closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Service"}, Namespace: "prod", Name: "web-svc", UID: "uid-svc"}
+	return closure.NewScanState([]closure.Object{
+		{Ref: dep},
+		{Ref: rs, Owners: []closure.OwnerRef{{Kind: "Deployment", Name: "web", UID: "uid-dep"}}},
+		{Ref: pod1, Owners: []closure.OwnerRef{{Kind: "ReplicaSet", Name: "web-rs", UID: "uid-rs"}}, Labels: map[string]string{"app": "web"}},
+		// The Service selects the pod but is NOT owned by the Deployment, so it escapes
+		// the derived ownership tree.
+		{Ref: svc, Selector: closure.LabelSelector{MatchLabels: map[string]string{"app": "web"}}},
+	})
+}
+
+// TestCheckLivePathDerivedScopeBlocks: with a cluster flag present the live path is
+// selected; it resolves the target Kind, builds the live State, DERIVES the Level-0
+// ownership scope (no contract), runs the shared Safe/mode/writeReport, and renders
+// the derived provenance. Under --mode enforce the un-owned Service escapes the
+// derived tree → BLOCK (errBlocked / exit 2).
+func TestCheckLivePathDerivedScopeBlocks(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{state: liveStateScenario01(), kind: "Deployment"})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--mode", "enforce", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("live check (enforce) err = %v, want errBlocked (Service escapes derived tree)", err)
+	}
+	stdout := out.String()
+	for _, want := range []string{
+		// The CLI target carries only the canonical Kind (no API group — the operator
+		// types "Deployment/web"); the engine resolves it by its human key (Kind/ns/name,
+		// group-ignored), so the derived ownership clause renders group-less.
+		"owns:Deployment/prod/web", // derived ownership clause rooted at the target
+		"derived (ownership-tree)", // derived provenance reported
+		"BLOCK",
+		"Service/prod/web-svc", // the un-owned Service escapes
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("live BLOCK report missing %q; got:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestCheckLivePathSelectionByKubeconfigFlag: --kubeconfig alone (no --context) also
+// selects the live path; the scenario-dir path is never taken (no positional dir).
+func TestCheckLivePathSelectionByKubeconfigFlag(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{state: liveStateScenario01(), kind: "Deployment"})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--kubeconfig", "/no/such/file", "--mode", "enforce", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("live check via --kubeconfig err = %v, want errBlocked", err)
+	}
+	if !strings.Contains(out.String(), "BLOCK") {
+		t.Errorf("live path not taken via --kubeconfig; got:\n%s", out.String())
+	}
+}
+
+// TestCheckLiveUnresolvableTarget: the cluster lists objects but NOT the named target.
+// closure.Safe's empty-closure fail-closed deny fires → BLOCK with a "fail-closed"
+// reason and errBlocked (exit 2). It is distinct from an unreadable-kind error, and it
+// is NOT softened by audit mode (a fail-closed Block, len(Escaping)==0, stays a deny).
+func TestCheckLiveUnresolvableTarget(t *testing.T) {
+	// A State with one unrelated Pod — the Deployment/web target is absent.
+	state := closure.NewScanState([]closure.Object{
+		{Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespace: "prod", Name: "other", UID: "uid-x"}},
+	})
+	withFakeLiveReader(t, &fakeLiveReader{state: state, kind: "Deployment"})
+
+	// Default mode (audit): a fail-closed Block must NOT be downgraded to WARN.
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("unresolvable target err = %v, want errBlocked (fail-closed, even in audit)", err)
+	}
+	stdout := out.String()
+	if !strings.Contains(stdout, "fail-closed") {
+		t.Errorf("stdout missing fail-closed reason; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "BLOCK") {
+		t.Errorf("fail-closed target-not-found should render BLOCK, not WARN; got:\n%s", stdout)
+	}
+}
+
+// TestCheckLiveUnreadableKind: a forbidden/unreadable kind makes the reader's State
+// return an error; the live path must DENY THE WHOLE CHECK fail-closed (exit 1, not
+// errBlocked), never proceeding on a partial snapshot. The reason names the cluster-read
+// failure and is distinguishable from an unresolvable target (which is exit 2 / BLOCK).
+func TestCheckLiveUnreadableKind(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{
+		kind:     "Deployment",
+		stateErr: errors.New("list secrets: secrets is forbidden: User cannot list resource secrets"),
+	})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("unreadable kind = nil error, want a fail-closed error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Errorf("a cluster-read failure must be exit 1 (operational), not errBlocked/exit 2; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "fail-closed") {
+		t.Errorf("error must name the fail-closed deny; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "forbidden") {
+		t.Errorf("error should surface the underlying read failure; got %v", err)
+	}
+}
+
+// TestCheckLiveDiscoveryFailure: a discovery failure (here surfaced via ResolveKind,
+// which queries discovery first) fails closed with a distinct reason — it never falls
+// back to a static kind map. Exit 1 (operational), not errBlocked.
+func TestCheckLiveDiscoveryFailure(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{
+		kindErr: errors.New("discover server resources: the server could not find the requested resource"),
+	})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("discovery failure = nil error, want a fail-closed error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Errorf("a discovery failure must be exit 1 (operational), not errBlocked/exit 2; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "discover server resources") {
+		t.Errorf("error should surface the discovery failure distinctly; got %v", err)
 	}
 }
 

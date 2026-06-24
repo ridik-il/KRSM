@@ -194,6 +194,32 @@ func TestReaderMapsClusterScopedKindToEmptyNamespace(t *testing.T) {
 	}
 }
 
+// TestSupportsList pins the load-bearing verb-filter decision: a verb set CONTAINING
+// "list" is listable; a non-empty set WITHOUT "list" (a create-only virtual resource)
+// is not; an EMPTY set errs toward inclusion (listable) so an omitted-Verbs discovery
+// answer never silently drops a real kind (the unsafe direction). A genuinely
+// non-listable empty-verb kind then fails closed at List, not here.
+func TestSupportsList(t *testing.T) {
+	cases := []struct {
+		name  string
+		verbs metav1.Verbs
+		want  bool
+	}{
+		{"empty errs toward inclusion", metav1.Verbs{}, true},
+		{"nil errs toward inclusion", nil, true},
+		{"has list", metav1.Verbs{"get", "list", "watch"}, true},
+		{"create-only is skipped", metav1.Verbs{"create"}, false},
+		{"get-only is skipped", metav1.Verbs{"get"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supportsList(tc.verbs); got != tc.want {
+				t.Errorf("supportsList(%v) = %v, want %v", tc.verbs, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReaderFailsClosedOnDiscoveryError(t *testing.T) {
 	disc := erroringDiscovery()
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds())
@@ -277,6 +303,86 @@ func TestPackageInvokesNoWriteVerbs(t *testing.T) {
 		}
 		if loc := writeCall.FindIndex(src); loc != nil {
 			t.Errorf("%s invokes a write verb at byte %d — internal/cluster must be read-only", name, loc[0])
+		}
+	}
+}
+
+// TestResolveKindCanonicalises: the live target's <Kind> token may be given in any
+// of the forms an operator types — the canonical Kind ("Deployment"), a lowercased
+// kind ("deployment"), the plural resource ("deployments"), or the singular resource
+// ("deployment"). ResolveKind maps all of them to the canonical Kind discovery
+// reports, because the live State resolves a uid-less target by its human key
+// Kind/ns/name (closure.Ref.human uses GVK.Kind verbatim), so the Kind MUST match the
+// live object's `kind` field exactly.
+func TestResolveKindCanonicalises(t *testing.T) {
+	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	r := newReader(disc, dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+
+	for _, token := range []string{"Deployment", "deployment", "deployments"} {
+		got, err := r.ResolveKind(context.Background(), token)
+		if err != nil {
+			t.Fatalf("ResolveKind(%q) = %v, want nil", token, err)
+		}
+		if got != "Deployment" {
+			t.Errorf("ResolveKind(%q) = %q, want canonical %q", token, got, "Deployment")
+		}
+	}
+}
+
+// TestResolveKindUnknownFailsClosed: a token that matches no discovered kind is an
+// error (the operator named a kind the cluster does not have) rather than a silent
+// pass-through that would later resolve no target.
+func TestResolveKindUnknownFailsClosed(t *testing.T) {
+	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	r := newReader(disc, dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+
+	if _, err := r.ResolveKind(context.Background(), "Widget"); err == nil {
+		t.Fatalf("ResolveKind(unknown) = nil error, want a not-found error")
+	}
+}
+
+// TestResolveKindFailsClosedOnDiscoveryError: discovery is the source of truth for
+// canonical kinds; a discovery failure must surface as an error, never a guessed Kind.
+func TestResolveKindFailsClosedOnDiscoveryError(t *testing.T) {
+	r := newReader(erroringDiscovery(), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+	if _, err := r.ResolveKind(context.Background(), "deployment"); err == nil {
+		t.Fatalf("ResolveKind must fail closed on discovery error")
+	}
+}
+
+// TestReaderSkipsNonListableResources: a real cluster discovers create-only "virtual"
+// resources in non-built-in groups — e.g. authorization.k8s.io localsubjectaccessreviews
+// / authentication.k8s.io selfsubjectreviews — that support `create` but NOT `list`.
+// Because such groups are not built-in, the broad CRD-inclusion rule would try to list
+// them, and the dynamic List then fails ("server could not find / does not allow this
+// method"), tripping the fail-closed path on every real cluster read. The Reader must
+// list only resources whose discovered verbs include `list`, so a non-listable kind is
+// skipped rather than fail-closing the whole check.
+func TestReaderSkipsNonListableResources(t *testing.T) {
+	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch"}},
+			},
+		},
+		{
+			GroupVersion: "authorization.k8s.io/v1",
+			APIResources: []metav1.APIResource{
+				// create-only virtual resource: no "list" verb.
+				{Name: "localsubjectaccessreviews", Kind: "LocalSubjectAccessReview", Namespaced: true, Verbs: metav1.Verbs{"create"}},
+			},
+		},
+	}}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds())
+	r := newReader(disc, dyn)
+
+	if _, err := r.State(context.Background()); err != nil {
+		t.Fatalf("State must not fail closed on a create-only virtual resource; got: %v", err)
+	}
+	for _, a := range dyn.Actions() {
+		if a.GetResource().Resource == "localsubjectaccessreviews" {
+			t.Errorf("Reader attempted to list a non-listable resource %q", a.GetResource())
 		}
 	}
 }

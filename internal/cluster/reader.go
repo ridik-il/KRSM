@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -123,10 +124,54 @@ func (r *Reader) State(ctx context.Context) (closure.State, error) {
 	return closure.NewScanState(built), nil
 }
 
+// ResolveKind maps a user-supplied <Kind> token to the canonical Kind discovery
+// reports. The CLI target has no uid, so the live State resolves it by its human key
+// (Kind/ns/name) and closure.Ref.human renders GVK.Kind verbatim — so the Kind must
+// equal the live object's `kind` field exactly. An operator may type the canonical
+// Kind, a lowercased kind, or the plural/singular resource name; ResolveKind accepts
+// any (case-insensitively) and returns the one canonical Kind.
+//
+// It FAILS CLOSED: a discovery error is returned (never a guessed Kind), and a token
+// matching no discovered resource is an error (the operator named a kind the cluster
+// does not have) rather than a silent pass-through that would resolve no target.
+func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
+	// Discovery (ServerGroupsAndResources) takes no context today; the ctx parameter
+	// keeps the signature uniform with State and ready for a context-aware RESTMapper.
+	_, lists, err := r.disc.ServerGroupsAndResources()
+	if err != nil {
+		return "", fmt.Errorf("discover server resources: %w", err)
+	}
+	want := strings.ToLower(token)
+	// First match wins. A Kind served by multiple GroupVersions (e.g. an apps/v1 and a
+	// legacy version) yields the SAME Kind string, and the downstream human key
+	// (Ref.human → Kind/ns/name) is group/version-agnostic, so resolving to a preferred
+	// version would gain nothing — deliberately not a preferred-version lookup.
+	for _, list := range lists {
+		for _, res := range list.APIResources {
+			if isSubresource(res.Name) {
+				continue
+			}
+			if want == strings.ToLower(res.Kind) ||
+				want == strings.ToLower(res.Name) ||
+				(res.SingularName != "" && want == strings.ToLower(res.SingularName)) {
+				return res.Kind, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unknown kind %q: no such resource in the cluster's API discovery", token)
+}
+
 // selectTargets picks the GVRs to list: every discovered resource whose kind is a
-// read target OR whose group is a custom (CRD) group. Subresources (names with a "/")
-// are skipped. The discovery answer is the source of truth, so a kind the cluster does
-// not report is never listed (no spurious "not found").
+// read target OR whose group is a custom (CRD) group, AND that actually supports the
+// `list` verb. Subresources (names with a "/") are skipped. The discovery answer is
+// the source of truth, so a kind the cluster does not report is never listed.
+//
+// The list-verb filter is essential on a REAL cluster: groups like authorization.k8s.io
+// / authentication.k8s.io expose create-only "virtual" resources (subjectaccessreviews,
+// tokenreviews) that are non-built-in and so would be swept in by the broad CRD rule,
+// but support only `create` — listing them errors and would fail-close every read. A
+// resource the four relations care about always supports `list`, so filtering on it is
+// safe (it never drops a closure member) and necessary.
 func selectTargets(lists []*metav1.APIResourceList) (listTargets, error) {
 	var out listTargets
 	seen := map[schema.GroupVersionResource]bool{}
@@ -142,6 +187,9 @@ func selectTargets(lists []*metav1.APIResourceList) (listTargets, error) {
 			if !readTargets[res.Kind] && builtInGroups[gv.Group] {
 				continue
 			}
+			if !supportsList(res.Verbs) {
+				continue
+			}
 			r := schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: res.Name}
 			if seen[r] {
 				continue
@@ -151,6 +199,29 @@ func selectTargets(lists []*metav1.APIResourceList) (listTargets, error) {
 		}
 	}
 	return out, nil
+}
+
+// supportsList reports whether a discovered resource's verb set includes "list".
+//
+// Safety direction: under-scoping the read (dropping a kind that IS a closure member)
+// is the unsafe error a safety gate must avoid; over-inclusion is merely conservative
+// (an extra List). So an EMPTY verb set errs toward INCLUSION (treated as listable):
+// some fakes and older discovery answers omit Verbs, and the four-relation readTargets
+// are all genuinely listable built-ins, so an empty set must not silently drop a real
+// kind. If an empty-verb kind turns out to be genuinely non-listable, its List then
+// fails — and State fails CLOSED on that error (it never proceeds on a partial read),
+// so the conservative inclusion is still safe. A NON-empty set lacking "list" (a
+// create-only virtual resource like subjectaccessreviews) is correctly skipped.
+func supportsList(verbs metav1.Verbs) bool {
+	if len(verbs) == 0 {
+		return true
+	}
+	for _, v := range verbs {
+		if v == "list" {
+			return true
+		}
+	}
+	return false
 }
 
 func isSubresource(name string) bool {
