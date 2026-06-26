@@ -34,6 +34,13 @@ func (p *partialDiscovery) ServerGroupsAndResources() ([]*metav1.APIGroup, []*me
 	return nil, p.resolved, &discovery.ErrGroupDiscoveryFailed{Groups: p.failed}
 }
 
+// ServerPreferredResources mirrors the partial failure for the LIST-target path (S3): the
+// resolved groups plus the same ErrGroupDiscoveryFailed, so serverPreferredResources
+// applies the identical tolerate/fail-closed rule as serverResources.
+func (p *partialDiscovery) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
+	return p.resolved, &discovery.ErrGroupDiscoveryFailed{Groups: p.failed}
+}
+
 func newPartialDiscovery(resolved []*metav1.APIResourceList, failed map[schema.GroupVersion]error) *partialDiscovery {
 	return &partialDiscovery{
 		FakeDiscovery: &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resolved}},

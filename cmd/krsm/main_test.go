@@ -176,9 +176,17 @@ type fakeLiveReader struct {
 	kind     string
 	stateErr error
 	kindErr  error
+	// stateBlocks models a hung API server: State waits for the request context to be
+	// cancelled (deadline or signal) and returns its error, so the S1 timeout path can be
+	// exercised hermetically.
+	stateBlocks bool
 }
 
-func (f *fakeLiveReader) State(context.Context) (closure.State, error) {
+func (f *fakeLiveReader) State(ctx context.Context) (closure.State, error) {
+	if f.stateBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return f.state, f.stateErr
 }
 
@@ -331,6 +339,57 @@ func TestCheckLiveDiscoveryFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "discover server resources") {
 		t.Errorf("error should surface the discovery failure distinctly; got %v", err)
+	}
+}
+
+// TestCheckLiveTimeoutFailsClosed (S1): a live read that outlives --timeout must DENY the
+// whole check fail-closed (exit 1, not errBlocked), never proceeding on a partial snapshot.
+// The fake reader's State blocks on the request context, so a tiny --timeout fires the
+// deadline; runCheckLive returns the cluster-read fail-closed error and writes no report.
+func TestCheckLiveTimeoutFailsClosed(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{kind: "Deployment", stateBlocks: true})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--timeout", "1ms", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("timed-out read = nil error, want a fail-closed error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Errorf("a timed-out read must be exit 1 (operational), not errBlocked/exit 2; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "fail-closed") {
+		t.Errorf("error must name the fail-closed deny; got %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("no report should be written on a fail-closed timeout; got stdout:\n%s", out.String())
+	}
+}
+
+// TestCheckLiveTimeoutZeroDisablesDeadline (S1): --timeout 0 means "no deadline"
+// (signal-cancel only); it must NOT instantly deadline, so a normal read completes and
+// renders its verdict as usual.
+func TestCheckLiveTimeoutZeroDisablesDeadline(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{state: liveStateScenario01(), kind: "Deployment"})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--mode", "enforce", "--timeout", "0", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("--timeout 0 should disable the deadline and run normally; err = %v, want errBlocked", err)
+	}
+	if !strings.Contains(out.String(), "BLOCK") {
+		t.Errorf("--timeout 0 normal run should render the verdict; got:\n%s", out.String())
+	}
+}
+
+// TestCheckTimeoutRejectsBadDuration (S1): a malformed --timeout is a usage error (exit 1),
+// not a silent default — the operator's invocation must be rejected, not misread.
+func TestCheckTimeoutRejectsBadDuration(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{state: liveStateScenario01(), kind: "Deployment"})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--timeout", "nope", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("malformed --timeout = nil error, want a usage error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Errorf("a malformed --timeout is a usage error (exit 1), not errBlocked/exit 2; got %v", err)
 	}
 }
 

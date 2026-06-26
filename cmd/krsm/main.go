@@ -13,8 +13,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -82,7 +85,7 @@ and docs/DESIGN.md for the architecture.
 
 const checkUsage = `Usage:
   krsm check [--plain] [--mode audit|enforce] <scenario-dir>
-  krsm check [--context X] [--kubeconfig P] [--plain] [--mode audit|enforce] <verb> <Kind/name> [-n ns]
+  krsm check [--context X] [--kubeconfig P] [--plain] [--mode audit|enforce] [--timeout 30s] <verb> <Kind/name> [-n ns]
 
 Scenario-dir path: requires cluster.yaml + request.yaml from <scenario-dir>. Scope is
 optional — it comes from taskcontract.yaml OR scope.yaml, otherwise derived (a Level-0
@@ -106,6 +109,9 @@ Flags:
   --plain              ASCII output without emoji (for CI logs / non-UTF8 terminals)
   --mode string        audit (default) downgrades a scope-escape Block to Warn so a
                        day-0 false positive does not deny; enforce keeps the Block.
+  --timeout duration   live-path deadline (default 30s); cancels on SIGINT/SIGTERM. 0
+                       disables the deadline (signal-cancel only). A deadline/cancel is a
+                       fail-closed cluster-read error (exit 1), never a partial snapshot.
 
 Exit codes: 0 allow/warn, 2 block, 1 usage / load / cluster-read error.
 A cluster-read failure (forbidden/unreadable kind or discovery failure) is a fail-closed
@@ -160,6 +166,7 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 	ctxFlag := fs.String("context", "", "kubeconfig context (selects the live-cluster path)")
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig path (selects the live-cluster path)")
 	namespace := fs.String("n", "", "target namespace (live path)")
+	timeout := fs.Duration("timeout", 30*time.Second, "live-path deadline (e.g. 30s); 0 disables the deadline (signal-cancel only)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, checkUsage)
@@ -183,6 +190,7 @@ func runCheck(args []string, stdout, stderr io.Writer) error {
 			namespace:   *namespace,
 			mode:        mode,
 			plain:       *plain,
+			timeout:     *timeout,
 		}, stdout, stderr)
 	}
 
@@ -218,6 +226,7 @@ type liveOpts struct {
 	namespace   string
 	mode        scope.Mode
 	plain       bool
+	timeout     time.Duration
 }
 
 // runCheckLive runs a check against a live cluster. It resolves a *rest.Config from
@@ -257,7 +266,17 @@ func runCheckLive(args []string, o liveOpts, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("check: %w", err)
 	}
-	ctx := context.Background()
+
+	// Bound the live read (S1): cancel on SIGINT/SIGTERM and, unless --timeout 0, after the
+	// deadline. A deadline/cancel surfaces through ResolveKind/State as a read error → the
+	// existing fail-closed path below; never a closure over a partial snapshot.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if o.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, o.timeout)
+		defer cancel()
+	}
 
 	// Split the target ONCE here; downstream takes the pieces, never the "Kind/name"
 	// string again (no duplicate re-validation).

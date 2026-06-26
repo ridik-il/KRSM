@@ -97,25 +97,32 @@ type listTargets = []schema.GroupVersionResource
 // State lists the relevant GVKs read-only, projects them through BuildObjects, and
 // returns a closure.State. Fail-closed on any discovery or list error.
 func (r *Reader) State(ctx context.Context) (closure.State, error) {
+	// Scope (the per-GVK namespaced flag) needs EVERY served version, so it reads the
+	// all-version ServerGroupsAndResources answer.
 	lists, err := serverResources(r.disc)
 	if err != nil {
 		return nil, err
 	}
-
 	scope := scopeFromLists(lists)
-	targets, err := selectTargets(lists)
+
+	// LIST targets read the SERVER-PREFERRED version only (S3), so a resource served at
+	// several versions (e.g. HPA at autoscaling/v1 and /v2) is listed once, not per version.
+	preferred, err := serverPreferredResources(r.disc)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := selectTargets(preferred)
 	if err != nil {
 		return nil, err
 	}
 
 	var objs []unstructured.Unstructured
 	for _, t := range targets {
-		// Resource(...).List is the ONLY dynamic verb this package invokes — read-only.
-		ul, err := r.dyn.Resource(t).List(ctx, metav1.ListOptions{})
+		items, err := r.listAll(ctx, t)
 		if err != nil {
 			return nil, fmt.Errorf("list %s: %w", t.Resource, err)
 		}
-		objs = append(objs, ul.Items...)
+		objs = append(objs, items...)
 	}
 
 	built, err := BuildObjects(objs, scope)
@@ -123,6 +130,31 @@ func (r *Reader) State(ctx context.Context) (closure.State, error) {
 		return nil, fmt.Errorf("build objects: %w", err)
 	}
 	return closure.NewScanState(built), nil
+}
+
+// listPageLimit is the per-page bound for the dynamic List (C3): a single check must not
+// pull every object of a kind in one unbounded call. 500 matches kubectl's default page
+// size — large enough to keep round-trips few, small enough to bound memory/latency.
+const listPageLimit = 500
+
+// listAll lists every object of gvr READ-ONLY across pages, following the Continue token
+// until the server reports no more. It is the ONLY place this package reads objects and
+// uses only Resource(...).List — no write verb. Any page error is returned (the caller
+// fails closed); a partial accumulation is never returned alongside an error.
+func (r *Reader) listAll(ctx context.Context, gvr schema.GroupVersionResource) ([]unstructured.Unstructured, error) {
+	var out []unstructured.Unstructured
+	cont := ""
+	for {
+		ul, err := r.dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: listPageLimit, Continue: cont})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ul.Items...)
+		cont = ul.GetContinue()
+		if cont == "" {
+			return out, nil
+		}
+	}
 }
 
 // ResolveKind maps a user-supplied <Kind> token to the canonical Kind discovery
@@ -287,6 +319,26 @@ func serverResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceLi
 		}
 		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
 			return nil, fmt.Errorf("discover server resources: closure-relevant API group(s) unavailable: %v", relevant)
+		}
+		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
+	}
+	return lists, nil
+}
+
+// serverPreferredResources lists one APIResourceList per resource at its SERVER-PREFERRED
+// version (S3), with the SAME partial-discovery tolerance as serverResources (C1): keep the
+// resolved lists, fail closed only if a closure-relevant (built-in) group is among the
+// failed set. It is used to pick LIST targets so a multi-version resource is listed once;
+// the all-version ServerGroupsAndResources answer still feeds the namespaced-scope map.
+func serverPreferredResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceList, error) {
+	lists, err := disc.ServerPreferredResources()
+	if err != nil {
+		var gdf *discovery.ErrGroupDiscoveryFailed
+		if !errors.As(err, &gdf) {
+			return nil, fmt.Errorf("discover preferred resources: %w", err)
+		}
+		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
+			return nil, fmt.Errorf("discover preferred resources: closure-relevant API group(s) unavailable: %v", relevant)
 		}
 		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
 	}
