@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -96,9 +97,9 @@ type listTargets = []schema.GroupVersionResource
 // State lists the relevant GVKs read-only, projects them through BuildObjects, and
 // returns a closure.State. Fail-closed on any discovery or list error.
 func (r *Reader) State(ctx context.Context) (closure.State, error) {
-	_, lists, err := r.disc.ServerGroupsAndResources()
+	lists, err := serverResources(r.disc)
 	if err != nil {
-		return nil, fmt.Errorf("discover server resources: %w", err)
+		return nil, err
 	}
 
 	scope := scopeFromLists(lists)
@@ -137,9 +138,9 @@ func (r *Reader) State(ctx context.Context) (closure.State, error) {
 func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
 	// Discovery (ServerGroupsAndResources) takes no context today; the ctx parameter
 	// keeps the signature uniform with State and ready for a context-aware RESTMapper.
-	_, lists, err := r.disc.ServerGroupsAndResources()
+	lists, err := serverResources(r.disc)
 	if err != nil {
-		return "", fmt.Errorf("discover server resources: %w", err)
+		return "", err
 	}
 	want := strings.ToLower(token)
 	// First match wins. A Kind served by multiple GroupVersions (e.g. an apps/v1 and a
@@ -257,11 +258,57 @@ func scopeFromLists(lists []*metav1.APIResourceList) ScopeInfo {
 // resources. It FAILS CLOSED on a discovery error — never returning a partial/empty
 // scope that would silently treat every GVK as unknown.
 func newDiscoveryScope(disc discovery.DiscoveryInterface) (ScopeInfo, error) {
-	_, lists, err := disc.ServerGroupsAndResources()
+	lists, err := serverResources(disc)
 	if err != nil {
-		return nil, fmt.Errorf("discover server resources: %w", err)
+		return nil, err
 	}
 	return scopeFromLists(lists), nil
+}
+
+// serverResources lists the cluster's API resources with PARTIAL-DISCOVERY TOLERANCE
+// (C1, docs/design/v0.5-c1-partial-discovery.md). ServerGroupsAndResources returns a
+// non-nil *discovery.ErrGroupDiscoveryFailed whenever an aggregated APIService is
+// momentarily unavailable (metrics-server rolling, a flaky custom-metrics adapter, a
+// webhook-backed group unreachable) WHILE STILL returning every group it could resolve.
+// Treating that as fatal — the pre-C1 behaviour — denied every action the moment an
+// unrelated aggregated API hiccupped, the single biggest real-world blocker.
+//
+// So: on ErrGroupDiscoveryFailed, KEEP the resolved lists and fail closed ONLY if a
+// closure-relevant (built-in) group is among the failed set — an aggregated metrics API
+// failing must not deny a `delete deployment`. Any OTHER error type stays fatal
+// (unchanged fail-closed behaviour). The error names only the failed groups, never any
+// credential material (the *rest.Config is never echoed).
+func serverResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceList, error) {
+	_, lists, err := disc.ServerGroupsAndResources()
+	if err != nil {
+		var gdf *discovery.ErrGroupDiscoveryFailed
+		if !errors.As(err, &gdf) {
+			return nil, fmt.Errorf("discover server resources: %w", err)
+		}
+		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
+			return nil, fmt.Errorf("discover server resources: closure-relevant API group(s) unavailable: %v", relevant)
+		}
+		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
+	}
+	return lists, nil
+}
+
+// closureRelevantFailures returns the built-in GroupVersions among a partial-discovery
+// failure. A built-in group hosts the closure relations (readTargets) and is served by
+// the core kube-apiserver, so its discovery failing signals a real incompleteness and
+// must fail closed. Non-built-in failures (aggregated metrics APIs, add-on/webhook
+// groups) carry no closure relation and are tolerated (the accepted C1 trade-off: a
+// simultaneously-failing CRD group that hosts an ownerReference participant degrades to a
+// tolerated partial read rather than the unusable fail-closed-on-any-hiccup behaviour —
+// see the design note's residual-risk section).
+func closureRelevantFailures(gdf *discovery.ErrGroupDiscoveryFailed) []schema.GroupVersion {
+	var relevant []schema.GroupVersion
+	for gv := range gdf.Groups {
+		if builtInGroups[gv.Group] {
+			relevant = append(relevant, gv)
+		}
+	}
+	return relevant
 }
 
 // discoveryScope is a ScopeInfo backed by a discovery-built GVK→namespaced map. A GVK
