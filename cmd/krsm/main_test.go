@@ -154,17 +154,38 @@ func TestExtractNamespace(t *testing.T) {
 // target" usage error, so a malformed target never reaches kind resolution or the
 // engine. This is the one place the target form is validated (no duplicate re-check).
 func TestSplitTargetRejects(t *testing.T) {
-	for _, target := range []string{"Deployment", "Deployment/", "/web", ""} {
-		if _, _, err := splitTarget(target); err == nil {
+	for _, target := range []string{"Deployment", "Deployment/", "/web", "", ".apps/web", "Deployment./web"} {
+		if _, _, _, err := splitTarget(target); err == nil {
 			t.Errorf("splitTarget(%q) = nil error, want an invalid-target error", target)
 		}
 	}
-	kind, name, err := splitTarget("Deployment/web")
+	kind, group, name, err := splitTarget("Deployment/web")
 	if err != nil {
 		t.Fatalf("splitTarget(Deployment/web) = %v, want nil", err)
 	}
-	if kind != "Deployment" || name != "web" {
-		t.Errorf("splitTarget(Deployment/web) = (%q, %q), want (Deployment, web)", kind, name)
+	if kind != "Deployment" || group != "" || name != "web" {
+		t.Errorf("splitTarget(Deployment/web) = (%q, %q, %q), want (Deployment, \"\", web)", kind, group, name)
+	}
+}
+
+// TestSplitTargetParsesGroupQualifier (S2 #16): the target accepts an optional ".group"
+// on the Kind — "<Kind>.<group>/<name>" — so an operator can disambiguate a Kind served
+// by multiple API groups. The group is split on the FIRST ".", so a multi-dot group
+// (example.com) is preserved.
+func TestSplitTargetParsesGroupQualifier(t *testing.T) {
+	cases := []struct{ in, kind, group, name string }{
+		{"Deployment.apps/web", "Deployment", "apps", "web"},
+		{"Cluster.infra.example.com/c1", "Cluster", "infra.example.com", "c1"},
+		{"Deployment/web", "Deployment", "", "web"},
+	}
+	for _, c := range cases {
+		kind, group, name, err := splitTarget(c.in)
+		if err != nil {
+			t.Fatalf("splitTarget(%q) = %v, want nil", c.in, err)
+		}
+		if kind != c.kind || group != c.group || name != c.name {
+			t.Errorf("splitTarget(%q) = (%q, %q, %q), want (%q, %q, %q)", c.in, kind, group, name, c.kind, c.group, c.name)
+		}
 	}
 }
 
@@ -190,14 +211,14 @@ func (f *fakeLiveReader) State(ctx context.Context) (closure.State, error) {
 	return f.state, f.stateErr
 }
 
-func (f *fakeLiveReader) ResolveKind(_ context.Context, token string) (string, error) {
+func (f *fakeLiveReader) ResolveKind(_ context.Context, kind, _ string) (string, error) {
 	if f.kindErr != nil {
 		return "", f.kindErr
 	}
 	if f.kind != "" {
 		return f.kind, nil
 	}
-	return token, nil
+	return kind, nil
 }
 
 // withFakeLiveReader swaps the live-reader constructor for one returning fr, so a

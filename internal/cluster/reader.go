@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -157,29 +158,49 @@ func (r *Reader) listAll(ctx context.Context, gvr schema.GroupVersionResource) (
 	}
 }
 
-// ResolveKind maps a user-supplied <Kind> token to the canonical Kind discovery
-// reports. The CLI target has no uid, so the live State resolves it by its human key
-// (Kind/ns/name) and closure.Ref.human renders GVK.Kind verbatim — so the Kind must
-// equal the live object's `kind` field exactly. An operator may type the canonical
-// Kind, a lowercased kind, or the plural/singular resource name; ResolveKind accepts
-// any (case-insensitively) and returns the one canonical Kind.
+// ResolveKind maps a user-supplied <Kind> token (optionally qualified by an API group)
+// to the canonical Kind discovery reports. The CLI target has no uid, so the live State
+// resolves it by its human key (Kind/ns/name) and closure.Ref.human renders GVK.Kind
+// verbatim — so the returned Kind must equal the live object's `kind` field exactly. An
+// operator may type the canonical Kind, a lowercased kind, or the plural/singular resource
+// name; matching is case-insensitive.
 //
-// It FAILS CLOSED: a discovery error is returned (never a guessed Kind), and a token
-// matching no discovered resource is an error (the operator named a kind the cluster
-// does not have) rather than a silent pass-through that would resolve no target.
-func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
+// group disambiguates a Kind served by more than one API group — the CRD-heavy-cluster
+// collision S2 (#16) addresses:
+//   - group != "": resolve the resource in THAT group only; fail closed if no such Kind is
+//     served there (never fall back to another group).
+//   - group == "" and the Kind is served by exactly one group: resolve it (the common case,
+//     unchanged — multiple served VERSIONS of one group still count as one group).
+//   - group == "" and the Kind is served by MORE THAN ONE group: FAIL CLOSED, listing the
+//     candidate groups, rather than silently picking whichever discovery enumerated first.
+//
+// It FAILS CLOSED throughout: a discovery error is returned (never a guessed Kind), and a
+// token matching no discovered resource is an error.
+//
+// Residual (documented): the returned target carries only the canonical Kind —
+// closure.Ref.human is group-agnostic by design (the goldens depend on it), so two
+// same-Kind objects in different groups sharing a namespace/name still share a human key in
+// the engine. The qualifier removes the *silent wrong-GVR* footgun on the CLI; the webhook's
+// uid-based match (a later slice) is the complete fix.
+func (r *Reader) ResolveKind(_ context.Context, kind, group string) (string, error) {
 	// Discovery (ServerGroupsAndResources) takes no context today; the ctx parameter
 	// keeps the signature uniform with State and ready for a context-aware RESTMapper.
 	lists, err := serverResources(r.disc)
 	if err != nil {
 		return "", err
 	}
-	want := strings.ToLower(token)
-	// First match wins. A Kind served by multiple GroupVersions (e.g. an apps/v1 and a
-	// legacy version) yields the SAME Kind string, and the downstream human key
-	// (Ref.human → Kind/ns/name) is group/version-agnostic, so resolving to a preferred
-	// version would gain nothing — deliberately not a preferred-version lookup.
+	want := strings.ToLower(kind)
+
+	// Collect the canonical Kind keyed by API group for every discovered resource the token
+	// matches (canonical Kind, lowercased kind, or plural/singular resource name), skipping
+	// subresources. Keying by group collapses multiple served versions of one group to a
+	// single entry, so multi-version (not multi-group) is never treated as ambiguous.
+	matches := map[string]string{} // group → canonical Kind
 	for _, list := range lists {
+		gv, err := schema.ParseGroupVersion(list.GroupVersion)
+		if err != nil {
+			continue
+		}
 		for _, res := range list.APIResources {
 			if isSubresource(res.Name) {
 				continue
@@ -187,11 +208,38 @@ func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
 			if want == strings.ToLower(res.Kind) ||
 				want == strings.ToLower(res.Name) ||
 				(res.SingularName != "" && want == strings.ToLower(res.SingularName)) {
-				return res.Kind, nil
+				matches[gv.Group] = res.Kind
 			}
 		}
 	}
-	return "", fmt.Errorf("unknown kind %q: no such resource in the cluster's API discovery", token)
+
+	if group != "" {
+		if canonical, ok := matches[group]; ok {
+			return canonical, nil
+		}
+		return "", fmt.Errorf("kind %q is not served by API group %q in the cluster's API discovery", kind, group)
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("unknown kind %q: no such resource in the cluster's API discovery", kind)
+	case 1:
+		for _, canonical := range matches {
+			return canonical, nil
+		}
+	}
+
+	// Ambiguous across groups: require an explicit qualifier rather than guess.
+	groups := make([]string, 0, len(matches))
+	for g := range matches {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	qualified := make([]string, len(groups))
+	for i, g := range groups {
+		qualified[i] = kind + "." + g
+	}
+	return "", fmt.Errorf("kind %q is ambiguous across API groups %v; qualify the target as one of %v", kind, groups, qualified)
 }
 
 // selectTargets picks the GVRs to list: every discovered resource whose kind is a

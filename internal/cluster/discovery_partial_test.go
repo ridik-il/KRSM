@@ -134,7 +134,7 @@ func TestResolveKindToleratesUnrelatedFailure(t *testing.T) {
 	})
 	r := newReader(disc, emptyDynamic())
 
-	got, err := r.ResolveKind(context.Background(), "deployment")
+	got, err := r.ResolveKind(context.Background(), "deployment", "")
 	if err != nil {
 		t.Fatalf("ResolveKind must tolerate an unrelated aggregated-API failure, got: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestResolveKindFailsClosedWhenClosureRelevantGroupFails(t *testing.T) {
 	})
 	r := newReader(disc, emptyDynamic())
 
-	if _, err := r.ResolveKind(context.Background(), "deployment"); err == nil {
+	if _, err := r.ResolveKind(context.Background(), "deployment", ""); err == nil {
 		t.Fatalf("ResolveKind must fail closed when a closure-relevant built-in group fails discovery")
 	}
 }
