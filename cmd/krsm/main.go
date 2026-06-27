@@ -37,7 +37,7 @@ var version = "0.0.0-dev"
 // substitute a fake so the live path runs with no cluster.
 type liveReader interface {
 	State(ctx context.Context) (closure.State, error)
-	ResolveKind(ctx context.Context, token string) (string, error)
+	ResolveKind(ctx context.Context, kind, group string) (string, error)
 }
 
 // newLiveReader resolves a *rest.Config from the kubeconfig/context flags and builds
@@ -280,13 +280,15 @@ func runCheckLive(args []string, o liveOpts, stdout, stderr io.Writer) error {
 
 	// Split the target ONCE here; downstream takes the pieces, never the "Kind/name"
 	// string again (no duplicate re-validation).
-	kindTok, name, err := splitTarget(target)
+	kindTok, group, name, err := splitTarget(target)
 	if err != nil {
 		return fmt.Errorf("check: %w", err)
 	}
-	// Normalize the user's <Kind> token to the canonical Kind discovery reports, so the
-	// uid-less target Ref carries the Kind the live State indexes by (Ref.human).
-	canonicalKind, err := reader.ResolveKind(ctx, kindTok)
+	// Normalize the user's <Kind>[.<group>] token to the canonical Kind discovery reports, so
+	// the uid-less target Ref carries the Kind the live State indexes by (Ref.human); the
+	// optional group disambiguates a Kind served by several API groups (fail-closed if
+	// ambiguous and unqualified).
+	canonicalKind, err := reader.ResolveKind(ctx, kindTok, group)
 	if err != nil {
 		// Fail closed: a kind the cluster does not report (or a discovery failure) is an
 		// operational deny, never a guessed Kind that resolves no target.
@@ -394,17 +396,24 @@ var liveVerbs = map[closure.Verb]bool{
 	closure.Restart: true,
 }
 
-// splitTarget splits a "<Kind>/<name>" target token into its canonical Kind and name,
-// rejecting a missing slash, an empty kind, or an empty name with one clear usage
-// error. It is the SINGLE place the target form is validated — runCheckLive calls it
-// once, then hands the pieces (after Kind normalization) to parseAction, so the form
-// is never re-split or re-validated downstream.
-func splitTarget(target string) (kind, name string, err error) {
-	kind, name, ok := strings.Cut(target, "/")
-	if !ok || kind == "" || name == "" {
-		return "", "", fmt.Errorf("invalid target %q (want <Kind>/<name>, e.g. Deployment/web)", target)
+// splitTarget splits a "<Kind>[.<group>]/<name>" target token into its Kind, an optional
+// API group, and the name, rejecting a missing slash, an empty kind, or an empty name with
+// one clear usage error. The optional ".<group>" qualifier disambiguates a Kind served by
+// several API groups (S2 #16): the name is split on the FIRST "/", then the Kind side is
+// split on the FIRST "." (so a multi-dot group such as "infra.example.com" is preserved as
+// the group). A trailing dot with no group ("Deployment./web") is rejected. It is the SINGLE
+// place the target form is validated — runCheckLive calls it once, then hands the pieces
+// (after Kind normalization) to parseAction, so the form is never re-split downstream.
+func splitTarget(target string) (kind, group, name string, err error) {
+	kindGroup, name, ok := strings.Cut(target, "/")
+	if !ok || kindGroup == "" || name == "" {
+		return "", "", "", fmt.Errorf("invalid target %q (want <Kind>[.<group>]/<name>, e.g. Deployment/web or Deployment.apps/web)", target)
 	}
-	return kind, name, nil
+	kind, group, hasDot := strings.Cut(kindGroup, ".")
+	if kind == "" || (hasDot && group == "") {
+		return "", "", "", fmt.Errorf("invalid target %q (want <Kind>[.<group>]/<name>, e.g. Deployment/web or Deployment.apps/web)", target)
+	}
+	return kind, group, name, nil
 }
 
 // parseAction builds a closure.Action from a verb and an ALREADY-SPLIT canonical Kind,
