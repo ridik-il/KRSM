@@ -14,9 +14,11 @@ package state
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync/atomic"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,13 +46,23 @@ type Options struct {
 	Resync time.Duration
 }
 
+// objectGetter does bounded, single-object live GETs for the staleness guard (FreshGet):
+// the dynamic client for normal kinds, the metadata client for metadata-only kinds. It is
+// read-only (only Get) and never lists — the O(d) on-demand fallback of ADR-0004.
+type objectGetter struct {
+	dyn  dynamic.Interface
+	meta metadata.Interface
+}
+
 // Provider is the informer-backed indexed closure.State.
 type Provider struct {
-	idx    *index
-	scope  cluster.ScopeInfo
-	starts []func(stopCh <-chan struct{})
-	syncs  []cache.InformerSynced
-	synced atomic.Bool
+	idx     *index
+	scope   cluster.ScopeInfo
+	starts  []func(stopCh <-chan struct{})
+	syncs   []cache.InformerSynced
+	synced  atomic.Bool
+	getter  objectGetter                   // dynamic + metadata clients for FreshGet
+	targets map[closure.GVK]cluster.Target // GVK → GVR/namespaced, for FreshGet resolution
 }
 
 var _ closure.State = (*Provider)(nil)
@@ -88,7 +100,7 @@ func New(cfg *rest.Config, opts Options) (*Provider, error) {
 
 	dynFactory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, opts.Resync)
 	metaFactory := metadatainformer.NewSharedInformerFactory(metaClient, opts.Resync)
-	return newProvider(dynFactory, full, metaFactory, meta, scope)
+	return newProvider(dynFactory, full, metaFactory, meta, scope, objectGetter{dyn: dyn, meta: metaClient})
 }
 
 // newProvider is the injectable seam: it takes already-built informer factories (real
@@ -102,10 +114,12 @@ func newProvider(
 	metaFactory metadatainformer.SharedInformerFactory,
 	metaTargets []cluster.Target,
 	scope cluster.ScopeInfo,
+	getter objectGetter,
 ) (*Provider, error) {
-	p := &Provider{idx: newIndex(), scope: scope}
+	p := &Provider{idx: newIndex(), scope: scope, getter: getter, targets: map[closure.GVK]cluster.Target{}}
 
 	for _, t := range fullTargets {
+		p.targets[t.GVK] = t
 		inf := dynFactory.ForResource(t.GVR).Informer()
 		reg, err := inf.AddEventHandler(p.dynamicHandler())
 		if err != nil {
@@ -114,6 +128,7 @@ func newProvider(
 		p.syncs = append(p.syncs, reg.HasSynced)
 	}
 	for _, t := range metaTargets {
+		p.targets[t.GVK] = t
 		inf := metaFactory.ForResource(t.GVR).Informer()
 		reg, err := inf.AddEventHandler(p.metadataHandler(t.GVK))
 		if err != nil {
@@ -169,7 +184,7 @@ func (p *Provider) ingestUnstructured(o any) {
 		return
 	}
 	if obj, err := cluster.Project(*u, p.scope); err == nil {
-		p.idx.upsert(obj)
+		p.idx.upsertWithRV(obj, u.GetResourceVersion())
 	}
 }
 
@@ -195,8 +210,12 @@ func (p *Provider) metadataHandler(gvk closure.GVK) cache.ResourceEventHandlerFu
 }
 
 func (p *Provider) ingestMetadata(o any, gvk closure.GVK) {
-	if obj, ok := p.projectMetadata(o, gvk); ok {
-		p.idx.upsert(obj)
+	pom, ok := o.(*metav1.PartialObjectMetadata)
+	if !ok {
+		return
+	}
+	if obj, ok := p.projectMetadata(pom, gvk); ok {
+		p.idx.upsertWithRV(obj, pom.GetResourceVersion())
 	}
 }
 
@@ -254,4 +273,149 @@ func (p *Provider) SelectorsMatchingLabels(ns string, labels map[string]string) 
 func (p *Provider) Consumers(target closure.Ref) []closure.Ref { return p.idx.consumers(target) }
 func (p *Provider) ControllersTargeting(r closure.Ref) []closure.Ref {
 	return p.idx.controllersTargeting(r)
+}
+
+// --- staleness guard (C2, slice 4): bounded on-demand GET, never a re-list ---
+
+// FreshGet does a bounded, on-demand live GET for one ref (the ADR-0004 fallback): the
+// METADATA client for metadata-only kinds (Secret/ConfigMap) so their data is never
+// fetched, the dynamic client otherwise, projected through the SAME cluster.Project the
+// informers use. Never a re-list. Returns (object, found, error); a NotFound is
+// (zero, false, nil) so the caller distinguishes "gone" from "error".
+func (p *Provider) FreshGet(ctx context.Context, ref closure.Ref) (closure.Object, bool, error) {
+	obj, _, found, err := p.freshGet(ctx, ref)
+	return obj, found, err
+}
+
+// freshGet is FreshGet plus the live object's resourceVersion, which the staleness guard
+// uses to confirm the cache was reconciled to the request's view.
+func (p *Provider) freshGet(ctx context.Context, ref closure.Ref) (closure.Object, string, bool, error) {
+	t, ok := p.targetFor(ref.GVK)
+	if !ok {
+		return closure.Object{}, "", false, nil
+	}
+	ns := ref.Namespace
+	if !t.Namespaced {
+		ns = ""
+	}
+
+	if metadataKinds[ref.GVK.Kind] {
+		var ri metadata.ResourceInterface = p.getter.meta.Resource(t.GVR)
+		if t.Namespaced {
+			ri = p.getter.meta.Resource(t.GVR).Namespace(ns)
+		}
+		pom, err := ri.Get(ctx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return closure.Object{}, "", false, nil
+		}
+		if err != nil {
+			return closure.Object{}, "", false, fmt.Errorf("fresh get %s/%s: %w", ref.GVK.Kind, ref.Name, err)
+		}
+		obj, ok := p.projectMetadata(pom, t.GVK)
+		if !ok {
+			return closure.Object{}, "", false, nil
+		}
+		return obj, pom.GetResourceVersion(), true, nil
+	}
+
+	var ri dynamic.ResourceInterface = p.getter.dyn.Resource(t.GVR)
+	if t.Namespaced {
+		ri = p.getter.dyn.Resource(t.GVR).Namespace(ns)
+	}
+	u, err := ri.Get(ctx, ref.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return closure.Object{}, "", false, nil
+	}
+	if err != nil {
+		return closure.Object{}, "", false, fmt.Errorf("fresh get %s/%s: %w", ref.GVK.Kind, ref.Name, err)
+	}
+	obj, err := cluster.Project(*u, p.scope)
+	if err != nil {
+		return closure.Object{}, "", false, fmt.Errorf("project %s/%s: %w", ref.GVK.Kind, ref.Name, err)
+	}
+	return obj, u.GetResourceVersion(), true, nil
+}
+
+// targetFor resolves the tracked GVR/namespaced for a ref's GVK: exact GVK first, then a
+// Kind fallback (a closure ref may carry a non-preferred group/version). An untracked
+// kind yields false → FreshGet reports not-found.
+func (p *Provider) targetFor(gvk closure.GVK) (cluster.Target, bool) {
+	if t, ok := p.targets[gvk]; ok {
+		return t, true
+	}
+	for k, t := range p.targets {
+		if k.Kind == gvk.Kind {
+			return t, true
+		}
+	}
+	return cluster.Target{}, false
+}
+
+// stalenessReason is the single, credential-free reason a verdict is denied because the
+// cache could not be confirmed current against the request (ADR-0004 fail-closed).
+const stalenessReason = "could not confirm current state"
+
+// StalenessError is returned by CheckFreshness when drift against the request cannot be
+// reconciled — the caller must fail closed. Its message never echoes credentials or data.
+type StalenessError struct{ Ref closure.Ref }
+
+func (e *StalenessError) Error() string { return stalenessReason }
+
+// CheckFreshness is the per-request staleness guard (C2, ADR-0004). Given the request
+// target and its authoritative resourceVersion (from the admission request) plus the
+// closure neighbourhood (the O(d) members the verdict depends on), it confirms the index
+// is current enough to trust:
+//
+//   - in sync (cache ≥ request rv) → returns nil with NO API call (the read-free hot path);
+//   - drift (cache older/absent) → a bounded FreshGet over {target} ∪ neighbourhood to
+//     reconcile the cache (never a re-list); if the target still cannot be reconciled to
+//     the request rv → *StalenessError (the caller fails closed).
+func (p *Provider) CheckFreshness(ctx context.Context, target closure.Ref, targetRV string, neighbourhood []closure.Ref) error {
+	if cachedRV, ok := p.idx.rvFor(target); ok && inSync(cachedRV, targetRV) {
+		return nil
+	}
+	targetKey := objKey(target)
+	var reconciledRV string
+	var targetFound bool
+	seen := map[string]bool{}
+	for _, r := range append([]closure.Ref{target}, neighbourhood...) {
+		k := objKey(r)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		obj, rv, found, err := p.freshGet(ctx, r)
+		if err != nil {
+			return &StalenessError{Ref: target}
+		}
+		if found {
+			p.idx.upsertWithRV(obj, rv)
+		}
+		if k == targetKey {
+			targetFound, reconciledRV = found, rv
+		}
+	}
+	if !targetFound || !inSync(reconciledRV, targetRV) {
+		return &StalenessError{Ref: target}
+	}
+	return nil
+}
+
+// inSync reports whether a cache entry at cachedRV is current for a request whose
+// authoritative object is at reqRV. resourceVersion is an opaque, server-assigned token;
+// the only guarantees are per-object monotonicity and (for etcd) a decimal-uint64 form.
+// Equal strings are trivially in sync. Otherwise we compare numerically when BOTH parse;
+// a cache strictly newer than the request is still in sync (it holds at least the
+// request's state). If either side does not parse, any difference is treated as drift —
+// the fail-closed-safe direction (prefer a bounded FreshGet over trusting a stale cache).
+func inSync(cachedRV, reqRV string) bool {
+	if cachedRV == reqRV {
+		return true
+	}
+	c, errC := strconv.ParseUint(cachedRV, 10, 64)
+	r, errR := strconv.ParseUint(reqRV, 10, 64)
+	if errC == nil && errR == nil {
+		return c >= r
+	}
+	return false
 }

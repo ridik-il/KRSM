@@ -186,6 +186,15 @@ func buildSyncedProvider(t *testing.T, objs []*unstructured.Unstructured) *Provi
 // metadata projection still carries the labels selector binding needs.
 func buildProvider(t *testing.T, full, meta []*unstructured.Unstructured) *Provider {
 	t.Helper()
+	p, _, _ := buildProviderC(t, full, meta)
+	return p
+}
+
+// buildProviderC is buildProvider but also returns the fake clients, so a test can
+// inspect the recorded actions (e.g. assert FreshGet hit the dynamic/metadata client and
+// the hot path issued no GET).
+func buildProviderC(t *testing.T, full, meta []*unstructured.Unstructured) (*Provider, *dynamicfake.FakeDynamicClient, *metadatafake.FakeMetadataClient) {
+	t.Helper()
 	gvrToListKind := map[schema.GroupVersionResource]string{}
 	var dynObjs, metaObjs []runtime.Object
 	var fullTargets, metaTargets []cluster.Target
@@ -231,7 +240,7 @@ func buildProvider(t *testing.T, full, meta []*unstructured.Unstructured) *Provi
 	dynFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynClient, 0)
 	metaFactory := metadatainformer.NewSharedInformerFactory(metaClient, 0)
 
-	p, err := newProvider(dynFactory, fullTargets, metaFactory, metaTargets, fakeScope{})
+	p, err := newProvider(dynFactory, fullTargets, metaFactory, metaTargets, fakeScope{}, objectGetter{dyn: dynClient, meta: metaClient})
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}
@@ -241,7 +250,7 @@ func buildProvider(t *testing.T, full, meta []*unstructured.Unstructured) *Provi
 	if !p.WaitForCacheSync(ctx) {
 		t.Fatalf("cache did not sync")
 	}
-	return p
+	return p, dynClient, metaClient
 }
 
 // uobj builds an unstructured object for the focused informer tests.

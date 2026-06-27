@@ -124,7 +124,7 @@ func TestProviderMethodsMatchScanState(t *testing.T) {
 // the observable, distinct not-ready signal the caller maps to a fail-closed deny
 // (DESIGN §5). A Provider that has not synced never silently reports a populated cache.
 func TestServeBeforeSyncFailsClosed(t *testing.T) {
-	p, err := newProvider(nil, nil, nil, nil, fakeScope{})
+	p, err := newProvider(nil, nil, nil, nil, fakeScope{}, objectGetter{})
 	if err != nil {
 		t.Fatalf("newProvider: %v", err)
 	}

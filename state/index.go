@@ -54,6 +54,7 @@ type index struct {
 	selOwner map[string][]closure.Ref   // namespace    → Service/PDB/NetworkPolicy refs
 	xref     map[string][]xrefEntry     // referentKey  → consumer entries
 	contrib  map[string]*contribution   // objKey       → what this object contributed
+	rv       map[string]string          // uid:UID and Kind/ns/name → resourceVersion (staleness guard)
 }
 
 func newIndex() *index {
@@ -65,6 +66,7 @@ func newIndex() *index {
 		selOwner: map[string][]closure.Ref{},
 		xref:     map[string][]xrefEntry{},
 		contrib:  map[string]*contribution{},
+		rv:       map[string]string{},
 	}
 }
 
@@ -72,7 +74,12 @@ func newIndex() *index {
 // key, since labels/owners/refs can change). The stored *Object is never mutated in
 // place — an update installs a NEW pointer — so a reader holding an earlier pointer
 // sees a consistent immutable snapshot.
-func (ix *index) upsert(o closure.Object) {
+func (ix *index) upsert(o closure.Object) { ix.upsertWithRV(o, "") }
+
+// upsertWithRV is upsert plus the object's resourceVersion, tracked for the staleness
+// guard. closure.Object carries no rv (and closure must stay unchanged), so rv lives in
+// the state index keyed exactly like the lookup maps (uid and Kind/ns/name).
+func (ix *index) upsertWithRV(o closure.Object, rv string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 
@@ -118,6 +125,12 @@ func (ix *index) upsert(o closure.Object) {
 	}
 
 	ix.contrib[key] = c
+	if rv != "" {
+		ix.rv[o.Ref.String()] = rv
+		if o.Ref.UID != "" {
+			ix.rv["uid:"+o.Ref.UID] = rv
+		}
+	}
 }
 
 // remove evicts the object identified by key and every edge it contributed.
@@ -148,6 +161,10 @@ func (ix *index) removeLocked(key string) {
 	for _, xk := range c.xrefKeys {
 		ix.xref[xk] = removeXref(ix.xref[xk], c.ref)
 	}
+	delete(ix.rv, c.ref.String())
+	if c.uid != "" {
+		delete(ix.rv, "uid:"+c.uid)
+	}
 	delete(ix.contrib, key)
 }
 
@@ -157,6 +174,20 @@ func (ix *index) get(r closure.Ref) (*closure.Object, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.lookupLocked(r)
+}
+
+// rvFor returns the cached resourceVersion for r (uid first, then Kind/ns/name), if the
+// object is tracked and was stored with one.
+func (ix *index) rvFor(r closure.Ref) (string, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	if r.UID != "" {
+		if rv, ok := ix.rv["uid:"+r.UID]; ok {
+			return rv, true
+		}
+	}
+	rv, ok := ix.rv[r.String()]
+	return rv, ok
 }
 
 // lookupLocked reproduces scanState.lookup: uid first, then Kind/ns/name.
