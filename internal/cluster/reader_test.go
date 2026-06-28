@@ -48,7 +48,7 @@ func resourceLists() []*metav1.APIResourceList {
 }
 
 func TestDiscoveryScopeNamespacedKind(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 
 	scope, err := newDiscoveryScope(disc)
 	if err != nil {
@@ -65,7 +65,7 @@ func TestDiscoveryScopeNamespacedKind(t *testing.T) {
 }
 
 func TestDiscoveryScopeClusterScopedKind(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 
 	scope, err := newDiscoveryScope(disc)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestDiscoveryScopeClusterScopedKind(t *testing.T) {
 }
 
 func TestDiscoveryScopeUndiscoveredGVKUnknown(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 
 	scope, err := newDiscoveryScope(disc)
 	if err != nil {
@@ -140,7 +140,7 @@ func obj(apiVersion, kind, ns, name, uid string, mut ...func(map[string]any)) *u
 
 func newTestReader(t *testing.T, objs ...*unstructured.Unstructured) *Reader {
 	t.Helper()
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 	runtimeObjs := make([]runtime.Object, 0, len(objs))
 	for _, o := range objs {
 		runtimeObjs = append(runtimeObjs, o)
@@ -231,7 +231,7 @@ func TestReaderFailsClosedOnDiscoveryError(t *testing.T) {
 }
 
 func TestReaderFailsClosedOnListError(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds())
 	dyn.PrependReactor("list", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("forbidden: cannot list secrets")
@@ -249,7 +249,7 @@ func TestReaderFailsClosedOnListError(t *testing.T) {
 
 func TestReaderUsesOnlyReadVerbs(t *testing.T) {
 	pod := obj("v1", "Pod", "prod", "web-1", "uid-p1")
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds(), pod)
 	r := newReader(disc, dyn)
 
@@ -315,7 +315,7 @@ func TestPackageInvokesNoWriteVerbs(t *testing.T) {
 // Kind/ns/name (closure.Ref.human uses GVK.Kind verbatim), so the Kind MUST match the
 // live object's `kind` field exactly.
 func TestResolveKindCanonicalises(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 	r := newReader(disc, dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
 
 	for _, token := range []string{"Deployment", "deployment", "deployments"} {
@@ -333,7 +333,7 @@ func TestResolveKindCanonicalises(t *testing.T) {
 // error (the operator named a kind the cluster does not have) rather than a silent
 // pass-through that would later resolve no target.
 func TestResolveKindUnknownFailsClosed(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: resourceLists()}}
+	disc := newFakeDiscovery(resourceLists())
 	r := newReader(disc, dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
 
 	if _, err := r.ResolveKind(context.Background(), "Widget"); err == nil {
@@ -359,7 +359,7 @@ func TestResolveKindFailsClosedOnDiscoveryError(t *testing.T) {
 // list only resources whose discovered verbs include `list`, so a non-listable kind is
 // skipped rather than fail-closing the whole check.
 func TestReaderSkipsNonListableResources(t *testing.T) {
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: []*metav1.APIResourceList{
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
 		{
 			GroupVersion: "v1",
 			APIResources: []metav1.APIResource{
@@ -373,7 +373,7 @@ func TestReaderSkipsNonListableResources(t *testing.T) {
 				{Name: "localsubjectaccessreviews", Kind: "LocalSubjectAccessReview", Namespaced: true, Verbs: metav1.Verbs{"create"}},
 			},
 		},
-	}}}
+	})
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds())
 	r := newReader(disc, dyn)
 
@@ -389,14 +389,14 @@ func TestReaderSkipsNonListableResources(t *testing.T) {
 
 func TestReaderSkipsUndiscoveredKinds(t *testing.T) {
 	// Discovery only reports core v1; the Reader must not attempt apps/v1 lists.
-	disc := &discoveryfake.FakeDiscovery{Fake: &clienttesting.Fake{Resources: []*metav1.APIResourceList{
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
 		{
 			GroupVersion: "v1",
 			APIResources: []metav1.APIResource{
 				{Name: "pods", Kind: "Pod", Namespaced: true},
 			},
 		},
-	}}}
+	})
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds())
 	r := newReader(disc, dyn)
 

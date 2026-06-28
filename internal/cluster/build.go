@@ -23,43 +23,33 @@ import (
 // loader's parse-boundary rejections. A GVK whose scope ScopeInfo cannot resolve is a
 // caller-level fail-closed concern (slice 4), not a builder error.
 func BuildObjects(objs []unstructured.Unstructured, scope ScopeInfo) ([]closure.Object, error) {
-	ix, err := newNameUIDIndex(objs, scope)
-	if err != nil {
-		return nil, err
-	}
 	out := make([]closure.Object, 0, len(objs))
 	for i := range objs {
-		o, err := buildOne(objs[i], scope, ix)
+		o, err := project(objs[i], scope)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, o)
 	}
+	// One-shot optimization: with the whole listed set in hand, fill each cross-ref's
+	// referent uid from the objects' real uids. The informer index (slice 3) skips this
+	// — closure.crossRefMatches falls back to Kind/ns/name — so the closure result is the
+	// same either way (see docs/design/v0.5-c2-consistent-snapshot.md).
+	resolveCrossRefUIDs(out)
 	return out, nil
 }
 
-// newNameUIDIndex maps every listed object's (Kind, resolved-namespace, name) to its
-// real metadata.uid. It resolves namespace the same way buildOne does so an
-// owner/cross-ref lookup keyed on the resolved namespace finds the referent.
-func newNameUIDIndex(objs []unstructured.Unstructured, scope ScopeInfo) (nameUIDIndex, error) {
-	ix := make(nameUIDIndex, len(objs))
-	for i := range objs {
-		kind, name, err := kindName(objs[i])
-		if err != nil {
-			return nil, err
-		}
-		ns := resolveNamespace(objs[i], scope)
-		uid := nestedString(objs[i].Object, "metadata", "uid")
-		if uid != "" {
-			ix[humanKey{Kind: kind, Namespace: ns, Name: name}] = uid
-		}
-	}
-	return ix, nil
-}
-
-// buildOne projects a single object. The relation extractors are filled in slice-1
-// test by test (selector, owners, cross-refs, finalizers).
-func buildOne(o unstructured.Unstructured, scope ScopeInfo, ix nameUIDIndex) (closure.Object, error) {
+// project extracts the four relations from ONE object into a closure.Object, using the
+// SAME unstructured field paths as the loader's parity oracle. It is INDEX-FREE: a
+// cross-ref carries its referent's Kind/namespace/name with an EMPTY uid (the engine's
+// crossRefMatches falls back to Kind/ns/name). It is shared verbatim by the one-shot
+// reader (via BuildObjects) and the informer index (slice 3), which is the parity
+// guarantee that keeps goldens 01–27 authoritative for the live paths.
+//
+// It fails closed (returns an error) on a malformed object — a missing kind or name, or a
+// selector with an unrecognised matchExpressions operator — mirroring the loader's
+// parse-boundary rejections.
+func project(o unstructured.Unstructured, scope ScopeInfo) (closure.Object, error) {
 	kind, name, err := kindName(o)
 	if err != nil {
 		return closure.Object{}, err
@@ -81,9 +71,31 @@ func buildOne(o unstructured.Unstructured, scope ScopeInfo, ix nameUIDIndex) (cl
 		Labels:     labelsOf(o),
 		Selector:   sel,
 		Owners:     ownersOf(o),
-		CrossRefs:  crossRefsFromUnstructured(o, ns, ix),
+		CrossRefs:  crossRefsFromUnstructured(o, ns),
 		Finalizers: finalizersOf(o),
 	}, nil
+}
+
+// resolveCrossRefUIDs fills each cross-ref's referent uid from a name→uid index built
+// over the projected objects themselves — the one-shot equivalent of the old per-build
+// nameUIDIndex. A referent not present in the set keeps an empty uid (the engine then
+// falls back to Kind/ns/name). It MUTATES objs in place. Index-free callers (the informer
+// index) simply do not invoke it.
+func resolveCrossRefUIDs(objs []closure.Object) {
+	ix := make(nameUIDIndex, len(objs))
+	for _, o := range objs {
+		if o.Ref.UID != "" {
+			ix[humanKey{Kind: o.Ref.GVK.Kind, Namespace: o.Ref.Namespace, Name: o.Ref.Name}] = o.Ref.UID
+		}
+	}
+	for i := range objs {
+		for j := range objs[i].CrossRefs {
+			cr := &objs[i].CrossRefs[j]
+			if cr.Ref.UID == "" {
+				cr.Ref.UID = ix.uidFor(cr.Ref.GVK.Kind, cr.Ref.Namespace, cr.Ref.Name)
+			}
+		}
+	}
 }
 
 // finalizersOf reads metadata.finalizers verbatim (nil when absent), the input to the

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -96,25 +97,32 @@ type listTargets = []schema.GroupVersionResource
 // State lists the relevant GVKs read-only, projects them through BuildObjects, and
 // returns a closure.State. Fail-closed on any discovery or list error.
 func (r *Reader) State(ctx context.Context) (closure.State, error) {
-	_, lists, err := r.disc.ServerGroupsAndResources()
+	// Scope (the per-GVK namespaced flag) needs EVERY served version, so it reads the
+	// all-version ServerGroupsAndResources answer.
+	lists, err := serverResources(r.disc)
 	if err != nil {
-		return nil, fmt.Errorf("discover server resources: %w", err)
+		return nil, err
 	}
-
 	scope := scopeFromLists(lists)
-	targets, err := selectTargets(lists)
+
+	// LIST targets read the SERVER-PREFERRED version only (S3), so a resource served at
+	// several versions (e.g. HPA at autoscaling/v1 and /v2) is listed once, not per version.
+	preferred, err := serverPreferredResources(r.disc)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := selectTargets(preferred)
 	if err != nil {
 		return nil, err
 	}
 
 	var objs []unstructured.Unstructured
 	for _, t := range targets {
-		// Resource(...).List is the ONLY dynamic verb this package invokes — read-only.
-		ul, err := r.dyn.Resource(t).List(ctx, metav1.ListOptions{})
+		items, err := r.listAll(ctx, t)
 		if err != nil {
 			return nil, fmt.Errorf("list %s: %w", t.Resource, err)
 		}
-		objs = append(objs, ul.Items...)
+		objs = append(objs, items...)
 	}
 
 	built, err := BuildObjects(objs, scope)
@@ -122,6 +130,31 @@ func (r *Reader) State(ctx context.Context) (closure.State, error) {
 		return nil, fmt.Errorf("build objects: %w", err)
 	}
 	return closure.NewScanState(built), nil
+}
+
+// listPageLimit is the per-page bound for the dynamic List (C3): a single check must not
+// pull every object of a kind in one unbounded call. 500 matches kubectl's default page
+// size — large enough to keep round-trips few, small enough to bound memory/latency.
+const listPageLimit = 500
+
+// listAll lists every object of gvr READ-ONLY across pages, following the Continue token
+// until the server reports no more. It is the ONLY place this package reads objects and
+// uses only Resource(...).List — no write verb. Any page error is returned (the caller
+// fails closed); a partial accumulation is never returned alongside an error.
+func (r *Reader) listAll(ctx context.Context, gvr schema.GroupVersionResource) ([]unstructured.Unstructured, error) {
+	var out []unstructured.Unstructured
+	cont := ""
+	for {
+		ul, err := r.dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: listPageLimit, Continue: cont})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ul.Items...)
+		cont = ul.GetContinue()
+		if cont == "" {
+			return out, nil
+		}
+	}
 }
 
 // ResolveKind maps a user-supplied <Kind> token to the canonical Kind discovery
@@ -137,9 +170,9 @@ func (r *Reader) State(ctx context.Context) (closure.State, error) {
 func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
 	// Discovery (ServerGroupsAndResources) takes no context today; the ctx parameter
 	// keeps the signature uniform with State and ready for a context-aware RESTMapper.
-	_, lists, err := r.disc.ServerGroupsAndResources()
+	lists, err := serverResources(r.disc)
 	if err != nil {
-		return "", fmt.Errorf("discover server resources: %w", err)
+		return "", err
 	}
 	want := strings.ToLower(token)
 	// First match wins. A Kind served by multiple GroupVersions (e.g. an apps/v1 and a
@@ -257,11 +290,77 @@ func scopeFromLists(lists []*metav1.APIResourceList) ScopeInfo {
 // resources. It FAILS CLOSED on a discovery error — never returning a partial/empty
 // scope that would silently treat every GVK as unknown.
 func newDiscoveryScope(disc discovery.DiscoveryInterface) (ScopeInfo, error) {
-	_, lists, err := disc.ServerGroupsAndResources()
+	lists, err := serverResources(disc)
 	if err != nil {
-		return nil, fmt.Errorf("discover server resources: %w", err)
+		return nil, err
 	}
 	return scopeFromLists(lists), nil
+}
+
+// serverResources lists the cluster's API resources with PARTIAL-DISCOVERY TOLERANCE
+// (C1, docs/design/v0.5-c1-partial-discovery.md). ServerGroupsAndResources returns a
+// non-nil *discovery.ErrGroupDiscoveryFailed whenever an aggregated APIService is
+// momentarily unavailable (metrics-server rolling, a flaky custom-metrics adapter, a
+// webhook-backed group unreachable) WHILE STILL returning every group it could resolve.
+// Treating that as fatal — the pre-C1 behaviour — denied every action the moment an
+// unrelated aggregated API hiccupped, the single biggest real-world blocker.
+//
+// So: on ErrGroupDiscoveryFailed, KEEP the resolved lists and fail closed ONLY if a
+// closure-relevant (built-in) group is among the failed set — an aggregated metrics API
+// failing must not deny a `delete deployment`. Any OTHER error type stays fatal
+// (unchanged fail-closed behaviour). The error names only the failed groups, never any
+// credential material (the *rest.Config is never echoed).
+func serverResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceList, error) {
+	_, lists, err := disc.ServerGroupsAndResources()
+	if err != nil {
+		var gdf *discovery.ErrGroupDiscoveryFailed
+		if !errors.As(err, &gdf) {
+			return nil, fmt.Errorf("discover server resources: %w", err)
+		}
+		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
+			return nil, fmt.Errorf("discover server resources: closure-relevant API group(s) unavailable: %v", relevant)
+		}
+		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
+	}
+	return lists, nil
+}
+
+// serverPreferredResources lists one APIResourceList per resource at its SERVER-PREFERRED
+// version (S3), with the SAME partial-discovery tolerance as serverResources (C1): keep the
+// resolved lists, fail closed only if a closure-relevant (built-in) group is among the
+// failed set. It is used to pick LIST targets so a multi-version resource is listed once;
+// the all-version ServerGroupsAndResources answer still feeds the namespaced-scope map.
+func serverPreferredResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceList, error) {
+	lists, err := disc.ServerPreferredResources()
+	if err != nil {
+		var gdf *discovery.ErrGroupDiscoveryFailed
+		if !errors.As(err, &gdf) {
+			return nil, fmt.Errorf("discover preferred resources: %w", err)
+		}
+		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
+			return nil, fmt.Errorf("discover preferred resources: closure-relevant API group(s) unavailable: %v", relevant)
+		}
+		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
+	}
+	return lists, nil
+}
+
+// closureRelevantFailures returns the built-in GroupVersions among a partial-discovery
+// failure. A built-in group hosts the closure relations (readTargets) and is served by
+// the core kube-apiserver, so its discovery failing signals a real incompleteness and
+// must fail closed. Non-built-in failures (aggregated metrics APIs, add-on/webhook
+// groups) carry no closure relation and are tolerated (the accepted C1 trade-off: a
+// simultaneously-failing CRD group that hosts an ownerReference participant degrades to a
+// tolerated partial read rather than the unusable fail-closed-on-any-hiccup behaviour —
+// see the design note's residual-risk section).
+func closureRelevantFailures(gdf *discovery.ErrGroupDiscoveryFailed) []schema.GroupVersion {
+	var relevant []schema.GroupVersion
+	for gv := range gdf.Groups {
+		if builtInGroups[gv.Group] {
+			relevant = append(relevant, gv)
+		}
+	}
+	return relevant
 }
 
 // discoveryScope is a ScopeInfo backed by a discovery-built GVK→namespaced map. A GVK
