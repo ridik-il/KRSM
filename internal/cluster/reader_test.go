@@ -319,7 +319,7 @@ func TestResolveKindCanonicalises(t *testing.T) {
 	r := newReader(disc, dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
 
 	for _, token := range []string{"Deployment", "deployment", "deployments"} {
-		got, err := r.ResolveKind(context.Background(), token)
+		got, err := r.ResolveKind(context.Background(), token, "", false)
 		if err != nil {
 			t.Fatalf("ResolveKind(%q) = %v, want nil", token, err)
 		}
@@ -336,7 +336,7 @@ func TestResolveKindUnknownFailsClosed(t *testing.T) {
 	disc := newFakeDiscovery(resourceLists())
 	r := newReader(disc, dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
 
-	if _, err := r.ResolveKind(context.Background(), "Widget"); err == nil {
+	if _, err := r.ResolveKind(context.Background(), "Widget", "", false); err == nil {
 		t.Fatalf("ResolveKind(unknown) = nil error, want a not-found error")
 	}
 }
@@ -345,8 +345,130 @@ func TestResolveKindUnknownFailsClosed(t *testing.T) {
 // canonical kinds; a discovery failure must surface as an error, never a guessed Kind.
 func TestResolveKindFailsClosedOnDiscoveryError(t *testing.T) {
 	r := newReader(erroringDiscovery(), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
-	if _, err := r.ResolveKind(context.Background(), "deployment"); err == nil {
+	if _, err := r.ResolveKind(context.Background(), "deployment", "", false); err == nil {
 		t.Fatalf("ResolveKind must fail closed on discovery error")
+	}
+}
+
+// ambiguousKindLists is a discovery answer where the SAME Kind ("Cluster") is served by
+// TWO distinct API groups — the CRD-heavy-cluster collision S2 (#16) is about. A bare
+// "Cluster" must NOT resolve to whichever group enumerates first.
+func ambiguousKindLists() []*metav1.APIResourceList {
+	return []*metav1.APIResourceList{
+		{
+			GroupVersion: "infra.example.com/v1",
+			APIResources: []metav1.APIResource{{Name: "clusters", Kind: "Cluster", Namespaced: true}},
+		},
+		{
+			GroupVersion: "db.example.com/v1",
+			APIResources: []metav1.APIResource{{Name: "clusters", Kind: "Cluster", Namespaced: true}},
+		},
+	}
+}
+
+// TestResolveKindQualifiedGroupResolves (S2 #16): a "<Kind>.<group>" qualifier resolves the
+// resource in THAT group — both for an unambiguous built-in (Deployment.apps) and for one
+// arm of an otherwise-ambiguous CRD Kind (Cluster.infra.example.com).
+func TestResolveKindQualifiedGroupResolves(t *testing.T) {
+	r := newReader(newFakeDiscovery(resourceLists()), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+	got, err := r.ResolveKind(context.Background(), "Deployment", "apps", true)
+	if err != nil {
+		t.Fatalf("ResolveKind(Deployment, apps) = %v, want nil", err)
+	}
+	if got != "Deployment" {
+		t.Errorf("ResolveKind(Deployment, apps) = %q, want %q", got, "Deployment")
+	}
+
+	ra := newReader(newFakeDiscovery(ambiguousKindLists()), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+	got, err = ra.ResolveKind(context.Background(), "Cluster", "infra.example.com", true)
+	if err != nil {
+		t.Fatalf("ResolveKind(Cluster, infra.example.com) = %v, want nil", err)
+	}
+	if got != "Cluster" {
+		t.Errorf("ResolveKind(Cluster, infra.example.com) = %q, want %q", got, "Cluster")
+	}
+}
+
+// TestResolveKindAmbiguousBareKindFailsClosed (S2 #16): a bare Kind served by >1 group
+// with no qualifier FAILS CLOSED, and the error names the candidate groups so the operator
+// can disambiguate — never a silent first-match.
+func TestResolveKindAmbiguousBareKindFailsClosed(t *testing.T) {
+	r := newReader(newFakeDiscovery(ambiguousKindLists()), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+	_, err := r.ResolveKind(context.Background(), "Cluster", "", false)
+	if err == nil {
+		t.Fatalf("ResolveKind(Cluster, \"\") = nil error, want a fail-closed ambiguity error")
+	}
+	for _, want := range []string{"infra.example.com", "db.example.com"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ambiguity error %q must list candidate group %q", err.Error(), want)
+		}
+	}
+}
+
+// TestResolveKindUnambiguousBareKindUnchanged (S2 #16): a Kind served by exactly one group
+// still resolves with no qualifier, exactly as before (no regression for the common case).
+func TestResolveKindUnambiguousBareKindUnchanged(t *testing.T) {
+	r := newReader(newFakeDiscovery(resourceLists()), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+	got, err := r.ResolveKind(context.Background(), "deployment", "", false)
+	if err != nil {
+		t.Fatalf("ResolveKind(deployment, \"\") = %v, want nil", err)
+	}
+	if got != "Deployment" {
+		t.Errorf("ResolveKind(deployment, \"\") = %q, want %q", got, "Deployment")
+	}
+}
+
+// TestResolveKindWrongGroupFailsClosed (S2 #16): a "<Kind>.<group>" whose named group does
+// not serve that Kind is a fail-closed error, never a fallback to another group.
+func TestResolveKindWrongGroupFailsClosed(t *testing.T) {
+	r := newReader(newFakeDiscovery(resourceLists()), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+	if _, err := r.ResolveKind(context.Background(), "Deployment", "batch", true); err == nil {
+		t.Fatalf("ResolveKind(Deployment, batch) = nil error, want a fail-closed wrong-group error")
+	}
+}
+
+// coreCollisionLists is the STOCK-cluster collision: "Event" is served by BOTH the core
+// (empty) group and events.k8s.io on every real Kubernetes cluster.
+func coreCollisionLists() []*metav1.APIResourceList {
+	return []*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{{Name: "events", Kind: "Event", Namespaced: true}},
+		},
+		{
+			GroupVersion: "events.k8s.io/v1",
+			APIResources: []metav1.APIResource{{Name: "events", Kind: "Event", Namespaced: true}},
+		},
+	}
+}
+
+// TestResolveKindExplicitCoreGroup (S2 #16): when the CORE group is one of the colliding
+// groups, an explicitly-qualified empty group (the CLI's trailing-dot form, "Event./name")
+// selects the core resource — and the bare-Kind ambiguity error suggests that exact,
+// typeable "Event." qualifier (a suggestion the CLI rejects would strand the operator with
+// no way to reach the core Event at all).
+func TestResolveKindExplicitCoreGroup(t *testing.T) {
+	r := newReader(newFakeDiscovery(coreCollisionLists()), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(dynamicScheme(), listKinds()))
+
+	got, err := r.ResolveKind(context.Background(), "event", "", true)
+	if err != nil {
+		t.Fatalf("ResolveKind(event, core-qualified) = %v, want nil", err)
+	}
+	if got != "Event" {
+		t.Errorf("ResolveKind(event, core-qualified) = %q, want %q", got, "Event")
+	}
+
+	_, err = r.ResolveKind(context.Background(), "Event", "", false)
+	if err == nil {
+		t.Fatalf("ResolveKind(Event, unqualified) = nil error, want a fail-closed ambiguity error")
+	}
+	if !strings.Contains(err.Error(), "Event. ") && !strings.Contains(err.Error(), "Event.]") {
+		t.Errorf("ambiguity error %q must suggest the typeable core qualifier %q", err.Error(), "Event.")
+	}
+
+	// A core qualifier for a Kind the core group does not serve stays fail-closed.
+	if _, err := r.ResolveKind(context.Background(), "Deployment", "", true); err == nil {
+		t.Fatalf("ResolveKind(Deployment, core-qualified) = nil error, want a fail-closed wrong-group error")
 	}
 }
 

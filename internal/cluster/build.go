@@ -9,6 +9,17 @@ import (
 	"github.com/ridik-il/krsm/closure"
 )
 
+// Project is the exported, per-object, INDEX-FREE projection: it extracts the four
+// relations from one unstructured object into a closure.Object, leaving each
+// cross-ref's referent uid EMPTY (no whole-set post-pass). It is the seam the
+// informer-backed index (state/) consumes so the live index and the one-shot reader
+// share ONE projection. BuildObjects additionally resolves cross-ref uids over the
+// whole listed set; the index instead relies on the engine's Kind/ns/name
+// crossRefMatches fallback (docs/design/v0.5-state-c2-c3-s2.md §"Parity-critical").
+func Project(o unstructured.Unstructured, scope ScopeInfo) (closure.Object, error) {
+	return project(o, scope)
+}
+
 // BuildObjects projects live unstructured objects into the per-relation
 // closure.Object set the engine consumes. It is PURE: no client, no I/O, no cluster.
 //
