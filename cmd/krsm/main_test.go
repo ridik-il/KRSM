@@ -760,3 +760,23 @@ func TestCheckReportShape(t *testing.T) {
 		}
 	}
 }
+
+// TestServeCommandFlagValidation (design test 22): `krsm serve` fails fast — BEFORE
+// any cluster contact — on missing TLS material or an invalid mode. A webhook that
+// cannot present a certificate or does not know its verdict mode must not start.
+func TestServeCommandFlagValidation(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if err := run([]string{"serve"}, &out, &errOut); err == nil {
+		t.Error("serve without --tls-cert/--tls-key must be a usage error")
+	}
+	if err := run([]string{"serve", "--tls-cert", "c.pem"}, &out, &errOut); err == nil {
+		t.Error("serve without --tls-key must be a usage error")
+	}
+	err := run([]string{"serve", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--mode", "bogus"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("serve with an invalid --mode must be a usage error")
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Errorf("error %q should name the invalid mode flag", err.Error())
+	}
+}

@@ -1,0 +1,66 @@
+package webhook
+
+import (
+	"context"
+	"testing"
+
+	admissionv1 "k8s.io/api/admission/v1"
+
+	"github.com/ridik-il/krsm/scope"
+)
+
+// TestHandleNonAgentRequestAdmitted (design test 10): KRSM gates ONLY agent-originated
+// requests. With an annotation matcher configured, a request whose object lacks the
+// annotation is admitted untouched — even one that would escape scope — while the SAME
+// request WITH the annotation is denied. Key "" matches everything (the e2e hook).
+func TestHandleNonAgentRequestAdmitted(t *testing.T) {
+	withKey := func(c *Config) { c.Matcher = AnnotationMatcher{Key: "krsm.io/task"} }
+
+	// Human-originated: no annotation anywhere → admitted despite the escape.
+	s := newTestServer(t, cascadeState(), scope.ModeEnforce, withKey)
+	out := s.Handle(context.Background(), deleteReview("req-human"))
+	if !out.Response.Allowed {
+		t.Errorf("non-agent request must be admitted untouched, got deny %q", out.Response.Result.Message)
+	}
+
+	// Agent-originated: oldObject carries the annotation → gated (denied, escaping).
+	agent := deleteReview("req-agent")
+	agent.Request.OldObject = raw(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"prod","uid":"uid-d","resourceVersion":"7","annotations":{"krsm.io/task":"t-42"}}}`)
+	out = s.Handle(context.Background(), agent)
+	if out.Response.Allowed {
+		t.Error("agent-annotated escaping delete must be gated (denied in enforce)")
+	}
+
+	// Key "" gates everything (newTestServer's default config sets no matcher).
+	all := newTestServer(t, cascadeState(), scope.ModeEnforce)
+	if out := all.Handle(context.Background(), deleteReview("req-any")); out.Response.Allowed {
+		t.Error("an empty matcher key must gate every request")
+	}
+}
+
+// TestAnnotationMatcher pins the matcher contract directly: object first, oldObject as
+// fallback, any value counts, empty key matches all.
+func TestAnnotationMatcher(t *testing.T) {
+	m := AnnotationMatcher{Key: "krsm.io/task"}
+	cases := []struct {
+		name string
+		req  *admissionv1.AdmissionRequest
+		want bool
+	}{
+		{"no payloads", &admissionv1.AdmissionRequest{}, false},
+		{"annotation on object", &admissionv1.AdmissionRequest{
+			Object: raw(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{"krsm.io/task":"x"}}}`)}, true},
+		{"annotation on oldObject", &admissionv1.AdmissionRequest{
+			OldObject: raw(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{"krsm.io/task":""}}}`)}, true},
+		{"other annotation only", &admissionv1.AdmissionRequest{
+			Object: raw(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{"team":"a"}}}`)}, false},
+	}
+	for _, c := range cases {
+		if got := m.Matches(c.req); got != c.want {
+			t.Errorf("%s: Matches = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if !(AnnotationMatcher{}).Matches(&admissionv1.AdmissionRequest{}) {
+		t.Error(`AnnotationMatcher{Key:""} must match everything`)
+	}
+}

@@ -8,10 +8,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -26,6 +28,8 @@ import (
 	"github.com/ridik-il/krsm/internal/cluster"
 	"github.com/ridik-il/krsm/internal/scenario"
 	"github.com/ridik-il/krsm/scope"
+	"github.com/ridik-il/krsm/state"
+	"github.com/ridik-il/krsm/webhook"
 )
 
 // version is overridden at release time via -ldflags "-X main.version=...".
@@ -148,6 +152,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stdout, usage)
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q (try \"krsm help\")", cmd)
 	}
@@ -594,4 +600,106 @@ func selectorStr(sel closure.LabelSelector) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// serveOpts are the parsed `krsm serve` flags.
+type serveOpts struct {
+	mode            string
+	listen          string
+	tlsCert, tlsKey string
+	agentAnnotation string
+	kubeconfig      string
+	contextName     string
+	requestTimeout  time.Duration
+	resync          time.Duration
+}
+
+// runServe validates the serve flags FAIL-FAST (a webhook without TLS material or a
+// known mode must not start), then builds the informer Provider, waits for the caches
+// to sync (an unsynced cache never serves — DESIGN §5), and serves the admission
+// endpoint over TLS until SIGINT/SIGTERM.
+func runServe(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var o serveOpts
+	fs.StringVar(&o.mode, "mode", string(scope.ModeAudit), "verdict mode: audit (default, ADR-0011) or enforce")
+	fs.StringVar(&o.listen, "listen", ":8443", "TLS listen address")
+	fs.StringVar(&o.tlsCert, "tls-cert", "", "path to the serving certificate (required)")
+	fs.StringVar(&o.tlsKey, "tls-key", "", "path to the serving key (required)")
+	fs.StringVar(&o.agentAnnotation, "agent-annotation", "krsm.io/task", `annotation key gating which requests KRSM evaluates ("" = all)`)
+	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: in-cluster, then ~/.kube/config)")
+	fs.StringVar(&o.contextName, "context", "", "kubeconfig context")
+	fs.DurationVar(&o.requestTimeout, "request-timeout", 0, "per-request deadline (default 10s; keep below the webhook config's timeoutSeconds)")
+	fs.DurationVar(&o.resync, "resync", 0, "informer resync period (0 = watch deltas only)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if o.tlsCert == "" || o.tlsKey == "" {
+		return errors.New("serve: --tls-cert and --tls-key are required (the webhook never serves plaintext)")
+	}
+	mode := scope.Mode(o.mode)
+	if mode != scope.ModeAudit && mode != scope.ModeEnforce {
+		return fmt.Errorf("serve: invalid --mode %q (want %q or %q)", o.mode, scope.ModeAudit, scope.ModeEnforce)
+	}
+	return serveWebhook(o, mode, stdout, stderr)
+}
+
+// serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
+// TLS listener, graceful shutdown. Kept separate so flag validation is hermetic.
+var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, stderr io.Writer) error {
+	reloader, err := webhook.NewCertReloader(o.tlsCert, o.tlsKey)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
+	cfg, err := restConfig(o.kubeconfig, o.contextName)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	provider, err := state.New(cfg, state.Options{Resync: o.resync})
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	provider.Start(ctx)
+	fmt.Fprintln(stdout, "krsm serve: waiting for informer caches to sync…")
+	if !provider.WaitForCacheSync(ctx) {
+		return errors.New("serve: informer caches did not sync (fail-closed: not serving)")
+	}
+
+	srv, err := webhook.New(webhook.Config{
+		State:     provider,
+		ScopeInfo: provider,
+		Synced:    provider.HasSynced,
+		Fresh:     provider,
+		Mode:      mode,
+		Matcher:   webhook.AnnotationMatcher{Key: o.agentAnnotation},
+		Timeout:   o.requestTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
+	httpSrv := &http.Server{
+		Addr:              o.listen,
+		Handler:           webhook.NewMux(srv),
+		TLSConfig:         &tls.Config{GetCertificate: reloader.GetCertificate, MinVersion: tls.VersionTLS12},
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
+
+	fmt.Fprintf(stdout, "krsm serve: mode=%s listening on %s\n", mode, o.listen)
+	if err := httpSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", err)
+	}
+	fmt.Fprintln(stdout, "krsm serve: shut down")
+	return nil
 }

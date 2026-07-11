@@ -397,6 +397,22 @@ func (p *Provider) freshGet(ctx context.Context, ref closure.Ref) (closure.Objec
 // resourceVersion vouch for a stale cache, so an ambiguous Kind yields false — FreshGet
 // reports not-found and CheckFreshness fails closed. An untracked kind likewise yields
 // false.
+// Namespaced exposes the discovery-derived scope (cluster.ScopeInfo) so the webhook
+// projects request payloads through the IDENTICAL projection the informers use.
+func (p *Provider) Namespaced(gvk closure.GVK) (bool, bool) { return p.scope.Namespaced(gvk) }
+
+// KindFor resolves a tracked GVR (group + resource) to its GVK — the EXACT,
+// discovery-derived mapping the webhook needs for sub-resource parents (scale/
+// eviction), never a pluralisation guess. Unknown resources report false.
+func (p *Provider) KindFor(group, resource string) (closure.GVK, bool) {
+	for gvk, t := range p.targets {
+		if t.GVR.Group == group && t.GVR.Resource == resource {
+			return gvk, true
+		}
+	}
+	return closure.GVK{}, false
+}
+
 func (p *Provider) targetFor(gvk closure.GVK) (cluster.Target, bool) {
 	if t, ok := p.targets[gvk]; ok {
 		return t, true
