@@ -112,6 +112,17 @@ func TestProviderMethodsMatchScanState(t *testing.T) {
 					assertSameRefSet(t, "SelectorsTargeting("+r.String()+")", p.SelectorsTargeting(r), sc.State.SelectorsTargeting(r))
 				}
 				assertSameRefSet(t, "PodsSelectedBy("+r.String()+")", p.PodsSelectedBy(r), sc.State.PodsSelectedBy(r))
+				// Direct rows for the two candidate-set methods (PR #32 review): the
+				// interface exists precisely so a mutation verdict can probe an
+				// ARBITRARY selector/label set — exercise them with every object's
+				// selector and label map, not only via their PodsSelectedBy/
+				// SelectorsTargeting wrappers.
+				assertSameRefSet(t, "PodsMatching("+r.String()+")",
+					p.PodsMatching(r.Namespace, o.Selector, r.GVK.Kind),
+					sc.State.PodsMatching(r.Namespace, o.Selector, r.GVK.Kind))
+				assertSameRefSet(t, "SelectorsMatchingLabels("+r.String()+")",
+					p.SelectorsMatchingLabels(r.Namespace, o.Labels),
+					sc.State.SelectorsMatchingLabels(r.Namespace, o.Labels))
 			}
 			for ns := range namespaces {
 				assertSameRefSet(t, "NamespaceContents("+ns+")", p.NamespaceContents(ns), sc.State.NamespaceContents(ns))

@@ -78,6 +78,13 @@ Commands:
                           <Kind/name> [-n ns]. See "krsm check --help".
                           --plain emits ASCII without emoji; --mode
                           audit|enforce governs scope-escape handling.
+  serve [flags]           Run the ValidatingWebhook server (audit-first) against
+                          the informer-backed indexed state. Requires --tls-cert
+                          and --tls-key; --mode audit|enforce (default audit);
+                          --listen (default :8443); --agent-annotation gates
+                          which requests KRSM evaluates (default krsm.io/task;
+                          "" gates everything). Fails closed on unsynced cache,
+                          staleness, timeout, or any error.
   version                 Print the krsm version
   help                    Show this help
 
@@ -646,7 +653,7 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 
 // serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
 // TLS listener, graceful shutdown. Kept separate so flag validation is hermetic.
-var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, stderr io.Writer) error {
+var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error {
 	reloader, err := webhook.NewCertReloader(o.tlsCert, o.tlsKey)
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)

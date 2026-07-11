@@ -48,6 +48,20 @@ type Options struct {
 	Resync time.Duration
 }
 
+// splitTargets routes each discovered target to its informer flavour: metadataKinds
+// (Secret/ConfigMap) go METADATA-ONLY so their data never enters the process (C3);
+// everything else gets a full dynamic informer.
+func splitTargets(targets []cluster.Target) (full, meta []cluster.Target) {
+	for _, t := range targets {
+		if metadataKinds[t.GVK.Kind] {
+			meta = append(meta, t)
+		} else {
+			full = append(full, t)
+		}
+	}
+	return full, meta
+}
+
 // objectGetter does bounded, single-object live GETs for the staleness guard (FreshGet):
 // the dynamic client for normal kinds, the metadata client for metadata-only kinds. It is
 // read-only (only Get) and never lists — the O(d) on-demand fallback of ADR-0004.
@@ -89,14 +103,7 @@ func New(cfg *rest.Config, opts Options) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	var full, meta []cluster.Target
-	for _, t := range targets {
-		if metadataKinds[t.GVK.Kind] {
-			meta = append(meta, t)
-		} else {
-			full = append(full, t)
-		}
-	}
+	full, meta := splitTargets(targets)
 
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {

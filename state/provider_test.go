@@ -29,3 +29,23 @@ func TestProviderKindFor(t *testing.T) {
 		t.Error("KindFor(unknown) must report false")
 	}
 }
+
+// TestSplitTargets (PR #32 review debt, design test 24): the state.New wiring routes
+// Secrets/ConfigMaps to the METADATA-ONLY informer factory (their data never enters
+// the process) and everything else to the full dynamic factory — exactly the
+// metadataKinds split, order-preserving.
+func TestSplitTargets(t *testing.T) {
+	in := []cluster.Target{
+		{GVR: corpusGVR["Deployment"], GVK: depGVK, Namespaced: true},
+		{GVR: corpusGVR["Secret"], GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespaced: true},
+		{GVR: corpusGVR["ConfigMap"], GVK: closure.GVK{Version: "v1", Kind: "ConfigMap"}, Namespaced: true},
+		{GVR: corpusGVR["Pod"], GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespaced: true},
+	}
+	full, meta := splitTargets(in)
+	if len(full) != 2 || full[0].GVK.Kind != "Deployment" || full[1].GVK.Kind != "Pod" {
+		t.Errorf("full = %+v, want [Deployment Pod]", full)
+	}
+	if len(meta) != 2 || meta[0].GVK.Kind != "Secret" || meta[1].GVK.Kind != "ConfigMap" {
+		t.Errorf("meta = %+v, want [Secret ConfigMap] (metadata-only, C3)", meta)
+	}
+}
