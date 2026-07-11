@@ -82,3 +82,59 @@ func TestStateNoWriteVerb(t *testing.T) {
 		}
 	}
 }
+
+// badSelectorDeployment is an object that passes the API server but fails
+// cluster.Project (an unrecognised matchExpressions operator) — the class of event the
+// handlers previously dropped in silence.
+func badSelectorDeployment(uid string) *unstructured.Unstructured {
+	return uobj("apps/v1", "Deployment", "prod", "web", uid, func(m map[string]any) {
+		m["spec"] = map[string]any{"selector": map[string]any{"matchExpressions": []any{
+			map[string]any{"key": "app", "operator": "Bogus", "values": []any{"web"}},
+		}}}
+	})
+}
+
+// TestIngestProjectFailureCountedAndLogged (review fix): an informer event whose object
+// fails projection cannot update the indexes — the affected entry may serve a stale
+// (under-inclusive) closure, the gate's worst failure class — so the drop must be
+// OBSERVABLE: counted in ProjectFailures and logged, and it must not install a partial
+// index entry.
+func TestIngestProjectFailureCountedAndLogged(t *testing.T) {
+	var logged []string
+	p := &Provider{idx: newIndex(), scope: fakeScope{}, logf: func(f string, _ ...any) { logged = append(logged, f) }}
+
+	p.ingestUnstructured(badSelectorDeployment("uid:dep"))
+
+	if got := p.ProjectFailures(); got != 1 {
+		t.Errorf("ProjectFailures() = %d, want 1", got)
+	}
+	if len(logged) != 1 {
+		t.Errorf("logged %d lines, want 1 (a dropped event must never be silent)", len(logged))
+	}
+	if _, ok := p.Get(closure.Ref{UID: "uid:dep"}); ok {
+		t.Error("a failed projection must not install an index entry")
+	}
+}
+
+// TestEvictProjectFailureStillRemovesEntry (review fix): a DELETE whose final object
+// fails projection must STILL evict the cached entry — removal needs only the identity
+// (uid, or Kind/ns/name), which survives a projection failure — so a gone object never
+// keeps serving edges as a ghost.
+func TestEvictProjectFailureStillRemovesEntry(t *testing.T) {
+	p := &Provider{idx: newIndex(), scope: fakeScope{}, logf: func(string, ...any) {}}
+
+	p.ingestUnstructured(uobj("apps/v1", "Deployment", "prod", "web", "uid:dep",
+		withLabels(map[string]string{"app": "web"})))
+	if _, ok := p.Get(closure.Ref{UID: "uid:dep"}); !ok {
+		t.Fatal("seed object did not reach the index")
+	}
+
+	p.evictUnstructured(badSelectorDeployment("uid:dep"))
+
+	if _, ok := p.Get(closure.Ref{UID: "uid:dep"}); ok {
+		t.Error("eviction must remove the entry by identity even when the final object fails projection (no ghost entries)")
+	}
+	if got := p.ProjectFailures(); got != 1 {
+		t.Errorf("ProjectFailures() = %d, want 1 (the failed eviction projection is still observable)", got)
+	}
+}

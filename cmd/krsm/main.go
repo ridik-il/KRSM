@@ -37,7 +37,7 @@ var version = "0.0.0-dev"
 // substitute a fake so the live path runs with no cluster.
 type liveReader interface {
 	State(ctx context.Context) (closure.State, error)
-	ResolveKind(ctx context.Context, kind, group string) (string, error)
+	ResolveKind(ctx context.Context, kind, group string, qualified bool) (string, error)
 }
 
 // newLiveReader resolves a *rest.Config from the kubeconfig/context flags and builds
@@ -280,15 +280,15 @@ func runCheckLive(args []string, o liveOpts, stdout, stderr io.Writer) error {
 
 	// Split the target ONCE here; downstream takes the pieces, never the "Kind/name"
 	// string again (no duplicate re-validation).
-	kindTok, group, name, err := splitTarget(target)
+	kindTok, group, name, qualified, err := splitTarget(target)
 	if err != nil {
 		return fmt.Errorf("check: %w", err)
 	}
 	// Normalize the user's <Kind>[.<group>] token to the canonical Kind discovery reports, so
 	// the uid-less target Ref carries the Kind the live State indexes by (Ref.human); the
 	// optional group disambiguates a Kind served by several API groups (fail-closed if
-	// ambiguous and unqualified).
-	canonicalKind, err := reader.ResolveKind(ctx, kindTok, group)
+	// ambiguous and unqualified; a trailing dot qualifies the core group explicitly).
+	canonicalKind, err := reader.ResolveKind(ctx, kindTok, group, qualified)
 	if err != nil {
 		// Fail closed: a kind the cluster does not report (or a discovery failure) is an
 		// operational deny, never a guessed Kind that resolves no target.
@@ -401,19 +401,22 @@ var liveVerbs = map[closure.Verb]bool{
 // one clear usage error. The optional ".<group>" qualifier disambiguates a Kind served by
 // several API groups (S2 #16): the name is split on the FIRST "/", then the Kind side is
 // split on the FIRST "." (so a multi-dot group such as "infra.example.com" is preserved as
-// the group). A trailing dot with no group ("Deployment./web") is rejected. It is the SINGLE
-// place the target form is validated — runCheckLive calls it once, then hands the pieces
-// (after Kind normalization) to parseAction, so the form is never re-split downstream.
-func splitTarget(target string) (kind, group, name string, err error) {
+// the group). A trailing dot ("Event./warn") qualifies the CORE (empty) group explicitly —
+// the only way to select, e.g., the core Event when events.k8s.io also serves an Event —
+// so qualified reports whether ANY qualifier was given (a qualified empty group is core,
+// an unqualified empty group means "resolve across all groups"). It is the SINGLE place
+// the target form is validated — runCheckLive calls it once, then hands the pieces (after
+// Kind normalization) to parseAction, so the form is never re-split downstream.
+func splitTarget(target string) (kind, group, name string, qualified bool, err error) {
 	kindGroup, name, ok := strings.Cut(target, "/")
 	if !ok || kindGroup == "" || name == "" {
-		return "", "", "", fmt.Errorf("invalid target %q (want <Kind>[.<group>]/<name>, e.g. Deployment/web or Deployment.apps/web)", target)
+		return "", "", "", false, fmt.Errorf("invalid target %q (want <Kind>[.<group>]/<name>, e.g. Deployment/web or Deployment.apps/web)", target)
 	}
-	kind, group, hasDot := strings.Cut(kindGroup, ".")
-	if kind == "" || (hasDot && group == "") {
-		return "", "", "", fmt.Errorf("invalid target %q (want <Kind>[.<group>]/<name>, e.g. Deployment/web or Deployment.apps/web)", target)
+	kind, group, qualified = strings.Cut(kindGroup, ".")
+	if kind == "" {
+		return "", "", "", false, fmt.Errorf("invalid target %q (want <Kind>[.<group>]/<name>, e.g. Deployment/web or Deployment.apps/web)", target)
 	}
-	return kind, group, name, nil
+	return kind, group, name, qualified, nil
 }
 
 // parseAction builds a closure.Action from a verb and an ALREADY-SPLIT canonical Kind,

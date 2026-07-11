@@ -165,14 +165,17 @@ func (r *Reader) listAll(ctx context.Context, gvr schema.GroupVersionResource) (
 // operator may type the canonical Kind, a lowercased kind, or the plural/singular resource
 // name; matching is case-insensitive.
 //
-// group disambiguates a Kind served by more than one API group — the CRD-heavy-cluster
-// collision S2 (#16) addresses:
-//   - group != "": resolve the resource in THAT group only; fail closed if no such Kind is
+// group + qualified disambiguate a Kind served by more than one API group — the
+// CRD-heavy-cluster collision S2 (#16) addresses:
+//   - qualified: resolve the resource in THAT group only — including the CORE group when
+//     group == "" (the CLI's trailing-dot form, "Event./name", the only way to select the
+//     core Event when events.k8s.io also serves one); fail closed if no such Kind is
 //     served there (never fall back to another group).
-//   - group == "" and the Kind is served by exactly one group: resolve it (the common case,
-//     unchanged — multiple served VERSIONS of one group still count as one group).
-//   - group == "" and the Kind is served by MORE THAN ONE group: FAIL CLOSED, listing the
+//   - unqualified and the Kind is served by exactly one group: resolve it (the common
+//     case, unchanged — multiple served VERSIONS of one group still count as one group).
+//   - unqualified and the Kind is served by MORE THAN ONE group: FAIL CLOSED, listing the
 //     candidate groups, rather than silently picking whichever discovery enumerated first.
+//     Every suggested qualifier is typeable, including "Kind." for the core group.
 //
 // It FAILS CLOSED throughout: a discovery error is returned (never a guessed Kind), and a
 // token matching no discovered resource is an error.
@@ -182,7 +185,7 @@ func (r *Reader) listAll(ctx context.Context, gvr schema.GroupVersionResource) (
 // same-Kind objects in different groups sharing a namespace/name still share a human key in
 // the engine. The qualifier removes the *silent wrong-GVR* footgun on the CLI; the webhook's
 // uid-based match (a later slice) is the complete fix.
-func (r *Reader) ResolveKind(_ context.Context, kind, group string) (string, error) {
+func (r *Reader) ResolveKind(_ context.Context, kind, group string, qualified bool) (string, error) {
 	// Discovery (ServerGroupsAndResources) takes no context today; the ctx parameter
 	// keeps the signature uniform with State and ready for a context-aware RESTMapper.
 	lists, err := serverResources(r.disc)
@@ -213,9 +216,12 @@ func (r *Reader) ResolveKind(_ context.Context, kind, group string) (string, err
 		}
 	}
 
-	if group != "" {
+	if qualified {
 		if canonical, ok := matches[group]; ok {
 			return canonical, nil
+		}
+		if group == "" {
+			return "", fmt.Errorf("kind %q is not served by the core API group in the cluster's API discovery", kind)
 		}
 		return "", fmt.Errorf("kind %q is not served by API group %q in the cluster's API discovery", kind, group)
 	}
@@ -235,11 +241,12 @@ func (r *Reader) ResolveKind(_ context.Context, kind, group string) (string, err
 		groups = append(groups, g)
 	}
 	sort.Strings(groups)
-	qualified := make([]string, len(groups))
+	suggestions := make([]string, len(groups))
 	for i, g := range groups {
-		qualified[i] = kind + "." + g
+		// "Kind." (trailing dot) is the typeable qualifier for the core (empty) group.
+		suggestions[i] = kind + "." + g
 	}
-	return "", fmt.Errorf("kind %q is ambiguous across API groups %v; qualify the target as one of %v", kind, groups, qualified)
+	return "", fmt.Errorf("kind %q is ambiguous across API groups %v; qualify the target as one of %v", kind, groups, suggestions)
 }
 
 // selectTargets picks the GVRs to list: every discovered resource whose kind is a

@@ -14,6 +14,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -63,6 +65,13 @@ type Provider struct {
 	synced  atomic.Bool
 	getter  objectGetter                   // dynamic + metadata clients for FreshGet
 	targets map[closure.GVK]cluster.Target // GVK → GVR/namespaced, for FreshGet resolution
+
+	// projectFailures counts informer events whose object failed cluster.Project and so
+	// could NOT update the indexes — each one is a potential under-inclusive (stale)
+	// index entry, the safety gate's worst failure class, so it is never silent: every
+	// occurrence is counted here and logged via logf.
+	projectFailures atomic.Uint64
+	logf            func(format string, args ...any) // nil → log.Printf
 }
 
 var _ closure.State = (*Provider)(nil)
@@ -183,9 +192,12 @@ func (p *Provider) ingestUnstructured(o any) {
 	if !ok {
 		return
 	}
-	if obj, err := cluster.Project(*u, p.scope); err == nil {
-		p.idx.upsertWithRV(obj, u.GetResourceVersion())
+	obj, err := cluster.Project(*u, p.scope)
+	if err != nil {
+		p.noteProjectFailure("ingest", u.GetKind(), u.GetNamespace(), u.GetName(), err)
+		return
 	}
+	p.idx.upsertWithRV(obj, u.GetResourceVersion())
 }
 
 func (p *Provider) evictUnstructured(o any) {
@@ -196,10 +208,42 @@ func (p *Provider) evictUnstructured(o any) {
 	if !ok {
 		return
 	}
-	if obj, err := cluster.Project(*u, p.scope); err == nil {
-		p.idx.remove(objKey(obj.Ref))
+	obj, err := cluster.Project(*u, p.scope)
+	if err != nil {
+		// Still evict: a delete must never leave a ghost entry serving edges for a gone
+		// object. Removal only needs the identity, which is present even when the
+		// projection fails (an unparseable selector, say) — uid when the object has one
+		// (always, for a real informer object), else the Kind/ns/name key.
+		p.noteProjectFailure("evict", u.GetKind(), u.GetNamespace(), u.GetName(), err)
+		gv, _ := schema.ParseGroupVersion(u.GetAPIVersion())
+		p.idx.remove(objKey(closure.Ref{
+			GVK:       closure.GVK{Group: gv.Group, Version: gv.Version, Kind: u.GetKind()},
+			Namespace: u.GetNamespace(),
+			Name:      u.GetName(),
+			UID:       string(u.GetUID()),
+		}))
+		return
 	}
+	p.idx.remove(objKey(obj.Ref))
 }
+
+// noteProjectFailure makes a dropped informer event observable: an event whose object
+// fails projection cannot maintain the indexes, so the affected entry may be stale
+// (under-inclusive) until the object changes again — counted and logged, never silent.
+func (p *Provider) noteProjectFailure(event, kind, ns, name string, err error) {
+	p.projectFailures.Add(1)
+	logf := p.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	logf("krsm/state: %s %s %s/%s: projection failed, index NOT updated (entry may be stale): %v", event, kind, ns, name, err)
+}
+
+// ProjectFailures reports how many informer events were dropped because their object
+// failed projection. A non-zero, growing value means the indexes are missing updates
+// for some object — an operator signal to investigate (typically a CRD with a selector
+// form the projection rejects).
+func (p *Provider) ProjectFailures() uint64 { return p.projectFailures.Load() }
 
 func (p *Provider) metadataHandler(gvk closure.GVK) cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
@@ -214,29 +258,42 @@ func (p *Provider) ingestMetadata(o any, gvk closure.GVK) {
 	if !ok {
 		return
 	}
-	if obj, ok := p.projectMetadata(pom, gvk); ok {
-		p.idx.upsertWithRV(obj, pom.GetResourceVersion())
+	obj, err := p.projectMetadata(pom, gvk)
+	if err != nil {
+		p.noteProjectFailure("ingest", gvk.Kind, pom.GetNamespace(), pom.GetName(), err)
+		return
 	}
+	p.idx.upsertWithRV(obj, pom.GetResourceVersion())
 }
 
 func (p *Provider) evictMetadata(o any, gvk closure.GVK) {
 	if tomb, ok := o.(cache.DeletedFinalStateUnknown); ok {
 		o = tomb.Obj
 	}
-	if obj, ok := p.projectMetadata(o, gvk); ok {
-		p.idx.remove(objKey(obj.Ref))
+	pom, ok := o.(*metav1.PartialObjectMetadata)
+	if !ok {
+		return
 	}
+	obj, err := p.projectMetadata(pom, gvk)
+	if err != nil {
+		// Still evict by identity — same no-ghost-entry rule as evictUnstructured.
+		p.noteProjectFailure("evict", gvk.Kind, pom.GetNamespace(), pom.GetName(), err)
+		p.idx.remove(objKey(closure.Ref{
+			GVK:       gvk,
+			Namespace: pom.GetNamespace(),
+			Name:      pom.GetName(),
+			UID:       string(pom.GetUID()),
+		}))
+		return
+	}
+	p.idx.remove(objKey(obj.Ref))
 }
 
 // projectMetadata builds a closure.Object from a PartialObjectMetadata, reusing the
 // SAME cluster.Project as the full path. It stamps the TypeMeta from the known GVK
 // (the metadata API may omit it) and converts to unstructured; the type carries no
 // `data`, so a Secret/ConfigMap projected here can never leak its data into the cache.
-func (p *Provider) projectMetadata(o any, gvk closure.GVK) (closure.Object, bool) {
-	pom, ok := o.(*metav1.PartialObjectMetadata)
-	if !ok {
-		return closure.Object{}, false
-	}
+func (p *Provider) projectMetadata(pom *metav1.PartialObjectMetadata, gvk closure.GVK) (closure.Object, error) {
 	pom = pom.DeepCopy()
 	pom.APIVersion = gvk.Version
 	if gvk.Group != "" {
@@ -246,13 +303,9 @@ func (p *Provider) projectMetadata(o any, gvk closure.GVK) (closure.Object, bool
 
 	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pom)
 	if err != nil {
-		return closure.Object{}, false
+		return closure.Object{}, fmt.Errorf("convert metadata object: %w", err)
 	}
-	obj, err := cluster.Project(unstructured.Unstructured{Object: m}, p.scope)
-	if err != nil {
-		return closure.Object{}, false
-	}
-	return obj, true
+	return cluster.Project(unstructured.Unstructured{Object: m}, p.scope)
 }
 
 // --- the nine closure.State methods, served from the indexes ---
@@ -311,9 +364,9 @@ func (p *Provider) freshGet(ctx context.Context, ref closure.Ref) (closure.Objec
 		if err != nil {
 			return closure.Object{}, "", false, fmt.Errorf("fresh get %s/%s: %w", ref.GVK.Kind, ref.Name, err)
 		}
-		obj, ok := p.projectMetadata(pom, t.GVK)
-		if !ok {
-			return closure.Object{}, "", false, nil
+		obj, err := p.projectMetadata(pom, t.GVK)
+		if err != nil {
+			return closure.Object{}, "", false, fmt.Errorf("project %s/%s: %w", ref.GVK.Kind, ref.Name, err)
 		}
 		return obj, pom.GetResourceVersion(), true, nil
 	}
@@ -336,17 +389,32 @@ func (p *Provider) freshGet(ctx context.Context, ref closure.Ref) (closure.Objec
 	return obj, u.GetResourceVersion(), true, nil
 }
 
-// targetFor resolves the tracked GVR/namespaced for a ref's GVK: exact GVK first, then a
-// Kind fallback (a closure ref may carry a non-preferred group/version). An untracked
-// kind yields false → FreshGet reports not-found.
+// targetFor resolves the tracked GVR/namespaced for a ref's GVK: exact GVK first, then
+// the same group+Kind at another (preferred) version, then a Kind-only fallback that is
+// accepted ONLY when the Kind is served by exactly one tracked group (a closure ref may
+// carry a non-preferred group/version). A Kind served by SEVERAL groups is the S2
+// collision class: guessing could FreshGet the wrong group's object and let its
+// resourceVersion vouch for a stale cache, so an ambiguous Kind yields false — FreshGet
+// reports not-found and CheckFreshness fails closed. An untracked kind likewise yields
+// false.
 func (p *Provider) targetFor(gvk closure.GVK) (cluster.Target, bool) {
 	if t, ok := p.targets[gvk]; ok {
 		return t, true
 	}
+	var kindMatch cluster.Target
+	kindMatches := 0
 	for k, t := range p.targets {
-		if k.Kind == gvk.Kind {
+		if k.Kind != gvk.Kind {
+			continue
+		}
+		if k.Group == gvk.Group {
 			return t, true
 		}
+		kindMatch = t
+		kindMatches++
+	}
+	if kindMatches == 1 {
+		return kindMatch, true
 	}
 	return cluster.Target{}, false
 }

@@ -204,3 +204,46 @@ func TestStalenessReasonCredentialFree(t *testing.T) {
 		t.Errorf("staleness reason = %q; must equal %q and never leak data", msg, stalenessReason)
 	}
 }
+
+// TestTargetForFailsClosedOnAmbiguousKind (S2-class review fix): the staleness guard
+// resolves which GVR to FreshGet for a ref. A ref whose GVK misses the exact tracked
+// entry falls back — same group+Kind first, then Kind-only — and the Kind-only fallback
+// MUST fail (untracked → not-found → fail closed at CheckFreshness) when the Kind is
+// served by SEVERAL tracked groups: guessing could GET the wrong group's object and let
+// its resourceVersion vouch for a stale cache (a false-ALLOW-adjacent path).
+func TestTargetForFailsClosedOnAmbiguousKind(t *testing.T) {
+	infraGVK := closure.GVK{Group: "infra.example.com", Version: "v1", Kind: "Cluster"}
+	dbGVK := closure.GVK{Group: "db.example.com", Version: "v1", Kind: "Cluster"}
+	p := &Provider{targets: map[closure.GVK]cluster.Target{
+		infraGVK: {GVR: schema.GroupVersionResource{Group: "infra.example.com", Version: "v1", Resource: "clusters"}, GVK: infraGVK, Namespaced: true},
+		dbGVK:    {GVR: schema.GroupVersionResource{Group: "db.example.com", Version: "v1", Resource: "clusters"}, GVK: dbGVK, Namespaced: true},
+	}}
+
+	// Exact GVK: resolves.
+	if tgt, ok := p.targetFor(infraGVK); !ok || tgt.GVR.Group != "infra.example.com" {
+		t.Errorf("targetFor(exact) = (%v, %v), want the infra.example.com target", tgt.GVR, ok)
+	}
+	// Same group+Kind at a non-preferred version: resolves to THAT group, never another.
+	if tgt, ok := p.targetFor(closure.GVK{Group: "db.example.com", Version: "v1alpha1", Kind: "Cluster"}); !ok || tgt.GVR.Group != "db.example.com" {
+		t.Errorf("targetFor(same group, other version) = (%v, %v), want the db.example.com target", tgt.GVR, ok)
+	}
+	// Kind-only with the Kind served by TWO groups: fail closed, never a silent pick.
+	if tgt, ok := p.targetFor(closure.GVK{Group: "other.example.com", Version: "v1", Kind: "Cluster"}); ok {
+		t.Errorf("targetFor(ambiguous Kind) = (%v, true), want (_, false) — a guess could FreshGet the wrong group's object", tgt.GVR)
+	}
+	if _, ok := p.targetFor(closure.GVK{Kind: "Cluster"}); ok {
+		t.Error("targetFor(bare ambiguous Kind) = true, want false")
+	}
+}
+
+// TestTargetForUniqueKindFallbackUnchanged: the Kind-only fallback still resolves when
+// exactly ONE tracked group serves the Kind (a ref carrying a non-preferred
+// group/version spelling of an unambiguous kind keeps working).
+func TestTargetForUniqueKindFallbackUnchanged(t *testing.T) {
+	p := &Provider{targets: map[closure.GVK]cluster.Target{
+		depGVK: {GVR: corpusGVR["Deployment"], GVK: depGVK, Namespaced: true},
+	}}
+	if tgt, ok := p.targetFor(closure.GVK{Group: "apps", Version: "v1beta1", Kind: "Deployment"}); !ok || tgt.GVR != corpusGVR["Deployment"] {
+		t.Errorf("targetFor(unique Kind, other version) = (%v, %v), want the deployments target", tgt.GVR, ok)
+	}
+}
