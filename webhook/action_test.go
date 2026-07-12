@@ -33,6 +33,20 @@ func (testScope) KindFor(group, resource string) (closure.GVK, bool) {
 
 func raw(json string) runtime.RawExtension { return runtime.RawExtension{Raw: []byte(json)} }
 
+// actionFor decodes the request payloads exactly as Handle does (once), then maps the
+// action — the test-side mirror of the production decode→map sequence.
+func actionFor(req *admissionv1.AdmissionRequest) (closure.Action, error) {
+	oldU, err := decodePayload(req.OldObject.Raw)
+	if err != nil {
+		return closure.Action{}, err
+	}
+	newU, err := decodePayload(req.Object.Raw)
+	if err != nil {
+		return closure.Action{}, err
+	}
+	return actionFromRequest(req, testScope{}, oldU, newU)
+}
+
 // TestActionFromDeleteRequest (design test 1, S2 #16 webhook half): a DELETE
 // AdmissionRequest maps to Verb=Delete with the request's REAL GVK, namespace, name and
 // the oldObject's uid as the target — no discovery-guess resolution anywhere.
@@ -46,7 +60,7 @@ func TestActionFromDeleteRequest(t *testing.T) {
 		OldObject: raw(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"prod","uid":"uid-dep"}}`),
 	}
 
-	a, err := actionFromRequest(req, testScope{})
+	a, err := actionFor(req)
 	if err != nil {
 		t.Fatalf("actionFromRequest(DELETE) = %v, want nil", err)
 	}
@@ -89,7 +103,7 @@ func TestActionCascadeFromPropagationPolicy(t *testing.T) {
 		if c.options != "" {
 			req.Options = raw(c.options)
 		}
-		a, err := actionFromRequest(req, testScope{})
+		a, err := actionFor(req)
 		if err != nil {
 			t.Fatalf("actionFromRequest(options=%s) = %v, want nil", c.options, err)
 		}
@@ -110,7 +124,7 @@ func TestActionFromUpdateRequest(t *testing.T) {
 		OldObject: raw(`{"apiVersion":"v1","kind":"Service","metadata":{"name":"svc","namespace":"prod","uid":"uid-svc"},"spec":{"selector":{"app":"a"}}}`),
 		Object:    raw(`{"apiVersion":"v1","kind":"Service","metadata":{"name":"svc","namespace":"prod","uid":"uid-svc"},"spec":{"selector":{"app":"b"}}}`),
 	}
-	a, err := actionFromRequest(req, testScope{})
+	a, err := actionFor(req)
 	if err != nil {
 		t.Fatalf("actionFromRequest(UPDATE) = %v, want nil", err)
 	}
@@ -138,7 +152,7 @@ func TestActionFromScaleSubresource(t *testing.T) {
 		Object:    raw(`{"apiVersion":"autoscaling/v1","kind":"Scale","metadata":{"name":"web","namespace":"prod"},"spec":{"replicas":0}}`),
 		OldObject: raw(`{"apiVersion":"autoscaling/v1","kind":"Scale","metadata":{"name":"web","namespace":"prod"},"spec":{"replicas":3}}`),
 	}
-	a, err := actionFromRequest(req, testScope{})
+	a, err := actionFor(req)
 	if err != nil {
 		t.Fatalf("actionFromRequest(scale) = %v, want nil", err)
 	}
@@ -165,7 +179,7 @@ func TestActionFromEviction(t *testing.T) {
 		Namespace:   "prod", Name: "web-1",
 		Object: raw(`{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"web-1","namespace":"prod"}}`),
 	}
-	a, err := actionFromRequest(req, testScope{})
+	a, err := actionFor(req)
 	if err != nil {
 		t.Fatalf("actionFromRequest(eviction) = %v, want nil", err)
 	}
@@ -187,7 +201,7 @@ func TestActionUnknownOperationFailsClosed(t *testing.T) {
 			Kind:      metav1.GroupVersionKind{Version: "v1", Kind: "Pod"},
 			Namespace: "prod", Name: "web-1",
 		}
-		if _, err := actionFromRequest(req, testScope{}); err == nil {
+		if _, err := actionFor(req); err == nil {
 			t.Errorf("actionFromRequest(%s) = nil error, want fail-closed", op)
 		}
 	}
@@ -196,7 +210,7 @@ func TestActionUnknownOperationFailsClosed(t *testing.T) {
 		Operation: admissionv1.Update, SubResource: "scale",
 		Resource: metav1.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"},
 	}
-	if _, err := actionFromRequest(req, testScope{}); err == nil {
+	if _, err := actionFor(req); err == nil {
 		t.Error("scale on an untracked parent resource must fail closed")
 	}
 }
@@ -213,12 +227,12 @@ func TestActionUnparsablePayloadFailsClosed(t *testing.T) {
 	}
 	garbage := base()
 	garbage.OldObject = raw(`{not json`)
-	if _, err := actionFromRequest(garbage, testScope{}); err == nil {
+	if _, err := actionFor(garbage); err == nil {
 		t.Error("garbage oldObject JSON must fail closed")
 	}
 	badSelector := base()
 	badSelector.OldObject = raw(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"prod","uid":"u"},"spec":{"selector":{"matchExpressions":[{"key":"app","operator":"Bogus"}]}}}`)
-	if _, err := actionFromRequest(badSelector, testScope{}); err == nil {
+	if _, err := actionFor(badSelector); err == nil {
 		t.Error("a projection failure must fail closed")
 	}
 }

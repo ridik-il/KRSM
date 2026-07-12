@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // maxReviewBytes caps the request body: an AdmissionReview carries at most two object
@@ -22,15 +24,20 @@ const defaultRequestTimeout = 10 * time.Second
 
 // ServeHTTP is the impure edge around Handle: strict method/content-type/body gates,
 // the per-request deadline, panic recovery to a fail-closed deny, and JSON encoding.
-// A malformed body with no recoverable uid is a 400 (there is nothing to address a
-// response to); every panic or internal failure with a known uid is a 200 + DENY —
-// the API server must always receive a verdict, and that verdict is never an allow.
+// A malformed body whose request.uid IS recoverable gets a 200 + deny(invalid) — the
+// API server can address that verdict; a body with no recoverable uid is a 400 (there
+// is nothing to address a response to). Every panic or internal failure with a known
+// uid is a 200 + DENY — the API server must always receive a verdict, and that
+// verdict is never an allow.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+	// Compare the media type, not the raw header: an intermediary adding a
+	// parameter ("application/json; charset=utf-8") must not turn every admission
+	// into a webhook failure (415 + failurePolicy would gate the whole cluster).
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -41,20 +48,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var review admissionv1.AdmissionReview
 	if err := json.Unmarshal(body, &review); err != nil {
-		// No decodable review → no uid → nothing to address a deny to.
-		http.Error(w, "malformed AdmissionReview", http.StatusBadRequest)
+		// Strict decode failed. If the request's uid is still recoverable from the
+		// raw JSON, answer it with a fail-closed deny (design §Behavior); only a
+		// body with no addressable uid is a 400.
+		uid := peekRequestUID(body)
+		if uid == "" {
+			http.Error(w, "malformed AdmissionReview", http.StatusBadRequest)
+			return
+		}
+		review = admissionv1.AdmissionReview{Request: &admissionv1.AdmissionRequest{UID: types.UID(uid)}}
+		s.writeReview(w, respond(review, deny(reasonInvalid, "malformed AdmissionReview")))
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
 	defer cancel()
 
-	out := s.handleSafe(ctx, review)
-	if out.APIVersion == "" {
-		// The API server rejects a response without TypeMeta; mirror v1 explicitly.
-		out.APIVersion = admissionv1.SchemeGroupVersion.String()
-		out.Kind = "AdmissionReview"
+	s.writeReview(w, s.handleSafe(ctx, review))
+}
+
+// peekRequestUID loosely extracts request.uid from a body that failed the strict
+// AdmissionReview decode — the one field needed to address a fail-closed deny.
+func peekRequestUID(body []byte) string {
+	var peek struct {
+		Request struct {
+			UID string `json:"uid"`
+		} `json:"request"`
 	}
+	if err := json.Unmarshal(body, &peek); err != nil {
+		return ""
+	}
+	return peek.Request.UID
+}
+
+// writeReview encodes one response review (respond has already stamped TypeMeta).
+func (s *Server) writeReview(w http.ResponseWriter, out admissionv1.AdmissionReview) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(out); err != nil {
 		s.logf("krsm/webhook: encode response: %v", err)

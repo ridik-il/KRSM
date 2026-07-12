@@ -27,19 +27,45 @@ type clusterInfo interface {
 	KindFor(group, resource string) (closure.GVK, bool)
 }
 
-// actionFromRequest maps an AdmissionRequest to the closure.Action, fail-closed: an
-// unmappable request returns an error and the caller denies. The request carries the
-// REAL GVK and the oldObject's uid (S2 #16 — no discovery-guess resolution), and the
-// payloads are projected through the SAME cluster.Project the informers use (parity).
+// gatedSubResource is the single source of truth for which sub-resources KRSM gates:
+// "scale" is a ScaleEffect on the parent, "eviction" is a pod delete in disguise.
+// Handle's admit branch and actionFromRequest's mapping both consult it, so the two
+// dispatch layers cannot drift — a sub-resource gated here without a mapping below
+// fails closed in actionFromRequest, never silently admits.
+func gatedSubResource(sub string) bool {
+	return sub == "scale" || sub == "eviction"
+}
+
+// decodePayload decodes one request payload (RawExtension JSON) into unstructured,
+// exactly once per payload per request — the matcher, the resourceVersion peek, and
+// the projection all read from the decoded value. Empty payload → nil (DELETE has no
+// object; DELETE on old API servers may omit oldObject — the staleness guard then
+// fails closed on the missing resourceVersion).
+func decodePayload(raw []byte) (*unstructured.Unstructured, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var u unstructured.Unstructured
+	if err := u.UnmarshalJSON(raw); err != nil {
+		return nil, fmt.Errorf("decode payload: %w", err)
+	}
+	return &u, nil
+}
+
+// actionFromRequest maps an AdmissionRequest (with its payloads decoded once by the
+// caller) to the closure.Action, fail-closed: an unmappable request returns an error
+// and the caller denies. The request carries the REAL GVK and the oldObject's uid
+// (S2 #16 — no discovery-guess resolution), and the payloads are projected through
+// the SAME cluster.Project the informers use (parity).
 //
 // Sub-resources: "scale" is a ScaleEffect on the PARENT (Verb Scale); "eviction" is a
 // pod delete in disguise (Verb Delete) — admitting it as a CREATE would bypass the
 // gate. Every other sub-resource is the CALLER's job to admit before calling here.
-func actionFromRequest(req *admissionv1.AdmissionRequest, info clusterInfo) (closure.Action, error) {
-	switch req.SubResource {
-	case "":
+func actionFromRequest(req *admissionv1.AdmissionRequest, info clusterInfo, oldU, newU *unstructured.Unstructured) (closure.Action, error) {
+	switch {
+	case req.SubResource == "":
 		// fall through to the main-resource mapping below
-	case "scale", "eviction":
+	case gatedSubResource(req.SubResource):
 		parent, ok := info.KindFor(req.Resource.Group, req.Resource.Resource)
 		if !ok {
 			return closure.Action{}, fmt.Errorf("unknown parent resource %s/%s for sub-resource %q", req.Resource.Group, req.Resource.Resource, req.SubResource)
@@ -67,11 +93,11 @@ func actionFromRequest(req *admissionv1.AdmissionRequest, info clusterInfo) (clo
 		return closure.Action{}, fmt.Errorf("unmappable operation %q", req.Operation)
 	}
 
-	old, err := projectRaw(req.OldObject.Raw, info)
+	old, err := projectPayload(oldU, info)
 	if err != nil {
 		return closure.Action{}, fmt.Errorf("oldObject: %w", err)
 	}
-	newObj, err := projectRaw(req.Object.Raw, info)
+	newObj, err := projectPayload(newU, info)
 	if err != nil {
 		return closure.Action{}, fmt.Errorf("object: %w", err)
 	}
@@ -109,20 +135,14 @@ func cascadeFromOptions(raw []byte) bool {
 	return opts.PropagationPolicy == nil || *opts.PropagationPolicy != metav1.DeletePropagationOrphan
 }
 
-// projectRaw projects a request payload (RawExtension JSON) into a closure.Object via
-// cluster.Project — identical field paths to the informer index, so the webhook's view
-// of the object matches the cache's. An empty payload is nil, not an error (DELETE has
-// no object; DELETE on old API servers may omit oldObject — the staleness guard then
-// fails closed on the missing resourceVersion).
-func projectRaw(raw []byte, scopeInfo cluster.ScopeInfo) (*closure.Object, error) {
-	if len(raw) == 0 {
+// projectPayload projects a decoded request payload into a closure.Object via
+// cluster.Project — identical field paths to the informer index, so the webhook's
+// view of the object matches the cache's. A nil payload stays nil.
+func projectPayload(u *unstructured.Unstructured, scopeInfo cluster.ScopeInfo) (*closure.Object, error) {
+	if u == nil {
 		return nil, nil
 	}
-	var u unstructured.Unstructured
-	if err := u.UnmarshalJSON(raw); err != nil {
-		return nil, fmt.Errorf("decode payload: %w", err)
-	}
-	obj, err := cluster.Project(u, scopeInfo)
+	obj, err := cluster.Project(*u, scopeInfo)
 	if err != nil {
 		return nil, fmt.Errorf("project payload: %w", err)
 	}

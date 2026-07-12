@@ -83,8 +83,10 @@ Commands:
                           and --tls-key; --mode audit|enforce (default audit);
                           --listen (default :8443); --agent-annotation gates
                           which requests KRSM evaluates (default krsm.io/task;
-                          "" gates everything). Fails closed on unsynced cache,
-                          staleness, timeout, or any error.
+                          "" gates everything); --agent-serviceaccount gates by
+                          request identity (required for scale/eviction/exec —
+                          those payloads cannot carry annotations). Fails closed
+                          on unsynced cache, staleness, timeout, or any error.
   version                 Print the krsm version
   help                    Show this help
 
@@ -611,14 +613,15 @@ func selectorStr(sel closure.LabelSelector) string {
 
 // serveOpts are the parsed `krsm serve` flags.
 type serveOpts struct {
-	mode            string
-	listen          string
-	tlsCert, tlsKey string
-	agentAnnotation string
-	kubeconfig      string
-	contextName     string
-	requestTimeout  time.Duration
-	resync          time.Duration
+	mode                 string
+	listen               string
+	tlsCert, tlsKey      string
+	agentAnnotation      string
+	agentServiceAccounts string
+	kubeconfig           string
+	contextName          string
+	requestTimeout       time.Duration
+	resync               time.Duration
 }
 
 // runServe validates the serve flags FAIL-FAST (a webhook without TLS material or a
@@ -633,10 +636,11 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&o.listen, "listen", ":8443", "TLS listen address")
 	fs.StringVar(&o.tlsCert, "tls-cert", "", "path to the serving certificate (required)")
 	fs.StringVar(&o.tlsKey, "tls-key", "", "path to the serving key (required)")
-	fs.StringVar(&o.agentAnnotation, "agent-annotation", "krsm.io/task", `annotation key gating which requests KRSM evaluates ("" = all)`)
+	fs.StringVar(&o.agentAnnotation, "agent-annotation", "krsm.io/task", `annotation key gating which requests KRSM evaluates ("" = all; blind to scale/eviction/exec payloads — combine with --agent-serviceaccount)`)
+	fs.StringVar(&o.agentServiceAccounts, "agent-serviceaccount", "", `comma-separated usernames whose requests KRSM evaluates (e.g. system:serviceaccount:agents:remediator); identity-based, covers scale/eviction/exec`)
 	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: in-cluster, then ~/.kube/config)")
 	fs.StringVar(&o.contextName, "context", "", "kubeconfig context")
-	fs.DurationVar(&o.requestTimeout, "request-timeout", 0, "per-request deadline (default 10s; keep below the webhook config's timeoutSeconds)")
+	fs.DurationVar(&o.requestTimeout, "request-timeout", 10*time.Second, "per-request deadline (keep below the webhook config's timeoutSeconds)")
 	fs.DurationVar(&o.resync, "resync", 0, "informer resync period (0 = watch deltas only)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -649,6 +653,34 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("serve: invalid --mode %q (want %q or %q)", o.mode, scope.ModeAudit, scope.ModeEnforce)
 	}
 	return serveWebhook(o, mode, stdout, stderr)
+}
+
+// agentMatcher assembles the AgentMatcher from the serve flags: annotation-key
+// matching always applies; when --agent-serviceaccount names identities, requests
+// from those usernames are gated too (the annotation matcher is structurally blind
+// to scale/eviction/exec payloads — PR #36 review finding 1).
+func agentMatcher(annotationKey, serviceAccounts string) webhook.AgentMatcher {
+	annotation := webhook.AnnotationMatcher{Key: annotationKey}
+	if serviceAccounts == "" {
+		return annotation
+	}
+	return webhook.AnyMatcher{webhook.NewServiceAccountMatcher(strings.Split(serviceAccounts, ",")), annotation}
+}
+
+// buildWebhookConfig assembles the production webhook.Config from the flags and the
+// Provider. Pure and hermetically tested: webhook.New tolerates a nil Fresh (guard
+// disabled), so ONLY a test over this assembly catches a dropped field before it
+// silently disables the staleness guard in production (PR #36 review finding 9).
+func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider) webhook.Config {
+	return webhook.Config{
+		State:     provider,
+		ScopeInfo: provider,
+		Synced:    provider.HasSynced,
+		Fresh:     provider,
+		Mode:      mode,
+		Matcher:   agentMatcher(o.agentAnnotation, o.agentServiceAccounts),
+		Timeout:   o.requestTimeout,
+	}
 }
 
 // serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
@@ -677,15 +709,7 @@ var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error
 		return errors.New("serve: informer caches did not sync (fail-closed: not serving)")
 	}
 
-	srv, err := webhook.New(webhook.Config{
-		State:     provider,
-		ScopeInfo: provider,
-		Synced:    provider.HasSynced,
-		Fresh:     provider,
-		Mode:      mode,
-		Matcher:   webhook.AnnotationMatcher{Key: o.agentAnnotation},
-		Timeout:   o.requestTimeout,
-	})
+	srv, err := webhook.New(buildWebhookConfig(o, mode, provider))
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -695,6 +719,14 @@ var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error
 		Handler:           webhook.NewMux(srv),
 		TLSConfig:         &tls.Config{GetCertificate: reloader.GetCertificate, MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound the whole request/response, not just the headers: without these a
+		// client that trickles its body (or never reads the response) holds a
+		// connection and goroutine forever — the handler's own deadline starts
+		// only after the body is fully read (PR #36 review finding 6). 30s is the
+		// ValidatingWebhookConfiguration timeoutSeconds ceiling.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  90 * time.Second,
 	}
 	go func() {
 		<-ctx.Done()

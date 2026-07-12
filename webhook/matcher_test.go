@@ -38,6 +38,21 @@ func TestHandleNonAgentRequestAdmitted(t *testing.T) {
 	}
 }
 
+// matches decodes a request's payloads (as Handle does) and runs the matcher over
+// them — the test-side mirror of the production decode→match sequence.
+func matches(t *testing.T, m AgentMatcher, req *admissionv1.AdmissionRequest) bool {
+	t.Helper()
+	oldU, err := decodePayload(req.OldObject.Raw)
+	if err != nil {
+		t.Fatalf("decode oldObject: %v", err)
+	}
+	newU, err := decodePayload(req.Object.Raw)
+	if err != nil {
+		t.Fatalf("decode object: %v", err)
+	}
+	return m.Matches(req, newU, oldU)
+}
+
 // TestAnnotationMatcher pins the matcher contract directly: object first, oldObject as
 // fallback, any value counts, empty key matches all.
 func TestAnnotationMatcher(t *testing.T) {
@@ -56,11 +71,11 @@ func TestAnnotationMatcher(t *testing.T) {
 			Object: raw(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","annotations":{"team":"a"}}}`)}, false},
 	}
 	for _, c := range cases {
-		if got := m.Matches(c.req); got != c.want {
+		if got := matches(t, m, c.req); got != c.want {
 			t.Errorf("%s: Matches = %v, want %v", c.name, got, c.want)
 		}
 	}
-	if !(AnnotationMatcher{}).Matches(&admissionv1.AdmissionRequest{}) {
+	if !matches(t, AnnotationMatcher{}, &admissionv1.AdmissionRequest{}) {
 		t.Error(`AnnotationMatcher{Key:""} must match everything`)
 	}
 }
