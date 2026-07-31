@@ -11,21 +11,22 @@ import (
 )
 
 // fakeFresh is the freshness seam fake: records the call, optionally runs a hook (to
-// model the cache reconciling), and returns err.
+// model the cache reconciling), and returns (reconciled, err).
 type fakeFresh struct {
-	err     error
-	called  bool
-	gotRV   string
-	gotRefs []closure.Ref
-	onCheck func()
+	err        error
+	reconciled bool
+	called     bool
+	gotRV      string
+	gotRefs    []closure.Ref
+	onCheck    func()
 }
 
-func (f *fakeFresh) CheckFreshness(_ context.Context, _ closure.Ref, rv string, refs []closure.Ref) error {
+func (f *fakeFresh) CheckFreshness(_ context.Context, _ closure.Ref, rv string, refs []closure.Ref) (bool, error) {
 	f.called, f.gotRV, f.gotRefs = true, rv, refs
 	if f.onCheck != nil {
 		f.onCheck()
 	}
-	return f.err
+	return f.reconciled, f.err
 }
 
 // switchState delegates to the embedded State and can be re-pointed mid-request —
@@ -64,7 +65,7 @@ func TestHandleServesRecomputedDecisionAfterReconcile(t *testing.T) {
 	reconciled := closure.NewScanState([]closure.Object{dep})
 
 	sw := &switchState{State: cascadeState()}
-	fresh := &fakeFresh{onCheck: func() { sw.State = reconciled }}
+	fresh := &fakeFresh{reconciled: true, onCheck: func() { sw.State = reconciled }}
 	s := newTestServer(t, sw, scope.ModeEnforce, func(c *Config) { c.Fresh = fresh })
 
 	out := s.Handle(context.Background(), deleteReview("req-recompute"))

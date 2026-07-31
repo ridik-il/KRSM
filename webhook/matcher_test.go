@@ -12,7 +12,7 @@ import (
 // TestHandleNonAgentRequestAdmitted (design test 10): KRSM gates ONLY agent-originated
 // requests. With an annotation matcher configured, a request whose object lacks the
 // annotation is admitted untouched — even one that would escape scope — while the SAME
-// request WITH the annotation is denied. Key "" matches everything (the e2e hook).
+// request WITH the annotation is denied. The default matcher (MatchAll) gates all.
 func TestHandleNonAgentRequestAdmitted(t *testing.T) {
 	withKey := func(c *Config) { c.Matcher = AnnotationMatcher{Key: "krsm.io/task"} }
 
@@ -31,10 +31,10 @@ func TestHandleNonAgentRequestAdmitted(t *testing.T) {
 		t.Error("agent-annotated escaping delete must be gated (denied in enforce)")
 	}
 
-	// Key "" gates everything (newTestServer's default config sets no matcher).
+	// The default matcher gates everything (newTestServer sets no matcher → MatchAll).
 	all := newTestServer(t, cascadeState(), scope.ModeEnforce)
 	if out := all.Handle(context.Background(), deleteReview("req-any")); out.Response.Allowed {
-		t.Error("an empty matcher key must gate every request")
+		t.Error("the default (MatchAll) matcher must gate every request")
 	}
 }
 
@@ -54,7 +54,7 @@ func matches(t *testing.T, m AgentMatcher, req *admissionv1.AdmissionRequest) bo
 }
 
 // TestAnnotationMatcher pins the matcher contract directly: object first, oldObject as
-// fallback, any value counts, empty key matches all.
+// fallback, any value counts, empty key matches NOTHING (a disabled matcher).
 func TestAnnotationMatcher(t *testing.T) {
 	m := AnnotationMatcher{Key: "krsm.io/task"}
 	cases := []struct {
@@ -75,7 +75,7 @@ func TestAnnotationMatcher(t *testing.T) {
 			t.Errorf("%s: Matches = %v, want %v", c.name, got, c.want)
 		}
 	}
-	if !matches(t, AnnotationMatcher{}, &admissionv1.AdmissionRequest{}) {
-		t.Error(`AnnotationMatcher{Key:""} must match everything`)
+	if matches(t, AnnotationMatcher{}, &admissionv1.AdmissionRequest{}) {
+		t.Error(`AnnotationMatcher{Key:""} must match NOTHING (a disabled matcher)`)
 	}
 }

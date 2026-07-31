@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -137,9 +138,9 @@ func TestReadyzHealthz(t *testing.T) {
 // when the request context is cancelled.
 type blockingFresh struct{}
 
-func (blockingFresh) CheckFreshness(ctx context.Context, _ closure.Ref, _ string, _ []closure.Ref) error {
+func (blockingFresh) CheckFreshness(ctx context.Context, _ closure.Ref, _ string, _ []closure.Ref) (bool, error) {
 	<-ctx.Done()
-	return ctx.Err()
+	return false, ctx.Err()
 }
 
 // TestServeHTTPDeadlineDeniesInsteadOfHanging (design test 19, S1 #15): the
@@ -180,6 +181,7 @@ func TestCertReloaderPicksUpRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCertReloader: %v", err)
 	}
+	r.probeInterval = 0 // probe on every handshake (production rate-limits to 10s)
 	first, err := r.GetCertificate(nil)
 	if err != nil {
 		t.Fatalf("GetCertificate: %v", err)
@@ -201,6 +203,95 @@ func TestCertReloaderPicksUpRotation(t *testing.T) {
 	if leaf.Subject.CommonName != "second.example" {
 		t.Errorf("served CN = %q, want the rotated second.example", leaf.Subject.CommonName)
 	}
+}
+
+// TestCertReloaderStatsKeyFile (design test 15): a rotation the cert file's mtime does
+// NOT reflect (only the key file changed) is still picked up — both files are stat'd.
+func TestCertReloaderStatsKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := dir+"/tls.crt", dir+"/tls.key"
+	writeSelfSigned(t, certPath, keyPath, "first.example")
+	r, err := NewCertReloader(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("NewCertReloader: %v", err)
+	}
+	r.probeInterval = 0
+	first, _ := r.GetCertificate(nil)
+
+	certInfo, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("stat cert: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	writeSelfSigned(t, certPath, keyPath, "second.example")
+	// Reset the cert file's mtime so ONLY the key file's mtime differs from the load.
+	if err := os.Chtimes(certPath, certInfo.ModTime(), certInfo.ModTime()); err != nil {
+		t.Fatalf("reset cert mtime: %v", err)
+	}
+	second, err := r.GetCertificate(nil)
+	if err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if string(first.Certificate[0]) == string(second.Certificate[0]) {
+		t.Error("a key-file-only mtime change must be picked up (both files are stat'd)")
+	}
+}
+
+// TestCertReloaderHalfWrittenKeepsPrevious (design test 15): a half-written rotation (a
+// cert file replaced before its matching key) must not kill live handshakes — the
+// previous pair keeps serving and GetCertificate never errors.
+func TestCertReloaderHalfWrittenKeepsPrevious(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := dir+"/tls.crt", dir+"/tls.key"
+	writeSelfSigned(t, certPath, keyPath, "first.example")
+	r, err := NewCertReloader(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("NewCertReloader: %v", err)
+	}
+	r.probeInterval = 0
+	first, _ := r.GetCertificate(nil)
+
+	time.Sleep(1100 * time.Millisecond)
+	if err := os.WriteFile(certPath, []byte("-----BEGIN CERTIFICATE-----\nnot a real cert\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatalf("write half-rotation: %v", err)
+	}
+	second, err := r.GetCertificate(nil)
+	if err != nil {
+		t.Fatalf("GetCertificate must not error on a half-written pair: %v", err)
+	}
+	if string(first.Certificate[0]) != string(second.Certificate[0]) {
+		t.Error("a half-written rotation must keep serving the previous certificate")
+	}
+}
+
+// TestCertReloaderConcurrentGet (design test 15): concurrent GetCertificate calls during
+// a rotation are race-free (run under -race) — the atomic pointer + rate-limited stat.
+func TestCertReloaderConcurrentGet(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := dir+"/tls.crt", dir+"/tls.key"
+	writeSelfSigned(t, certPath, keyPath, "first.example")
+	r, err := NewCertReloader(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("NewCertReloader: %v", err)
+	}
+	r.probeInterval = 0
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.GetCertificate(nil); err != nil {
+				t.Errorf("GetCertificate: %v", err)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		writeSelfSigned(t, certPath, keyPath, "second.example")
+	}()
+	wg.Wait()
 }
 
 // writeSelfSigned writes a minimal self-signed cert+key pair for cn.

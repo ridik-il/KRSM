@@ -25,15 +25,39 @@ import (
 type clusterInfo interface {
 	cluster.ScopeInfo
 	KindFor(group, resource string) (closure.GVK, bool)
+	// Tracked reports whether the informer set watches the target's kind (group+Kind,
+	// version-insensitive). A kind the informers do not track has no closure the webhook
+	// can compute — it fails closed with a distinct taxonomy code (round-2 finding 4).
+	Tracked(gvk closure.GVK) bool
 }
 
-// gatedSubResource is the single source of truth for which sub-resources KRSM gates:
-// "scale" is a ScaleEffect on the parent, "eviction" is a pod delete in disguise.
-// Handle's admit branch and actionFromRequest's mapping both consult it, so the two
-// dispatch layers cannot drift — a sub-resource gated here without a mapping below
-// fails closed in actionFromRequest, never silently admits.
-func gatedSubResource(sub string) bool {
-	return sub == "scale" || sub == "eviction"
+// subResourceGate describes how one gated sub-resource maps to an Action. The table is
+// the SINGLE source of truth consulted by all three dispatch sites — Handle's
+// CREATE-admit branch, the resourceVersion precheck, and actionFromRequest — so they
+// cannot drift (round-2 finding 8 + the three scattered "eviction" literals).
+type subResourceGate struct {
+	verb       closure.Verb // Scale | Delete | Update on the parent
+	viaCreate  bool         // arrives as a CREATE (eviction) — exempt it from the CREATE admit
+	carriesRV  bool         // oldObject carries the parent's resourceVersion (false for eviction)
+	hasPayload bool         // project object/oldObject into Action.Old/New (ephemeralcontainers)
+}
+
+// gatedSubResources is the set of sub-resources KRSM evaluates: "scale" is a ScaleEffect
+// on the parent, "eviction" is a pod delete in disguise (a CREATE), and
+// "ephemeralcontainers" is the only path that injects an ephemeral container — a pod
+// mutation carrying full Pod objects (round-2 finding 1). A sub-resource gated here
+// without a switch arm in actionFromRequest fails closed, never silently admits.
+var gatedSubResources = map[string]subResourceGate{
+	"scale":               {verb: closure.Scale, carriesRV: true},
+	"eviction":            {verb: closure.Delete, viaCreate: true},
+	"ephemeralcontainers": {verb: closure.Update, carriesRV: true, hasPayload: true},
+}
+
+// gatedSubResource looks up a sub-resource's gate. The empty sub-resource ("") is the
+// main resource and is never in the table.
+func gatedSubResource(sub string) (subResourceGate, bool) {
+	g, ok := gatedSubResources[sub]
+	return g, ok
 }
 
 // decodePayload decodes one request payload (RawExtension JSON) into unstructured,
@@ -62,25 +86,40 @@ func decodePayload(raw []byte) (*unstructured.Unstructured, error) {
 // pod delete in disguise (Verb Delete) — admitting it as a CREATE would bypass the
 // gate. Every other sub-resource is the CALLER's job to admit before calling here.
 func actionFromRequest(req *admissionv1.AdmissionRequest, info clusterInfo, oldU, newU *unstructured.Unstructured) (closure.Action, error) {
-	switch {
-	case req.SubResource == "":
-		// fall through to the main-resource mapping below
-	case gatedSubResource(req.SubResource):
+	if req.SubResource != "" {
+		gate, ok := gatedSubResource(req.SubResource)
+		if !ok {
+			return closure.Action{}, fmt.Errorf("ungated sub-resource %q reached actionFromRequest", req.SubResource)
+		}
 		parent, ok := info.KindFor(req.Resource.Group, req.Resource.Resource)
 		if !ok {
 			return closure.Action{}, fmt.Errorf("unknown parent resource %s/%s for sub-resource %q", req.Resource.Group, req.Resource.Resource, req.SubResource)
 		}
-		verb := closure.Scale
-		if req.SubResource == "eviction" {
-			verb = closure.Delete
+		target := closure.Ref{GVK: parent, Namespace: req.Namespace, Name: req.Name}
+		action := closure.Action{Verb: gate.verb, Target: target, Cascade: true}
+		if gate.verb == closure.Delete {
+			// eviction (F8): the propagationPolicy lives on the Eviction body's
+			// deleteOptions (newU); req.Options carries CreateOptions for the CREATE,
+			// so cascadeFromOptions never sees it. Orphan → false, else conservative.
+			action.Cascade = cascadeFromEviction(newU)
 		}
-		return closure.Action{
-			Verb:    verb,
-			Target:  closure.Ref{GVK: parent, Namespace: req.Namespace, Name: req.Name},
-			Cascade: true,
-		}, nil
-	default:
-		return closure.Action{}, fmt.Errorf("ungated sub-resource %q reached actionFromRequest", req.SubResource)
+		if gate.hasPayload {
+			// ephemeralcontainers carries FULL Pod objects, so the payloads project
+			// like a plain pod UPDATE and the target uid comes from oldObject.
+			old, err := projectPayload(oldU, info)
+			if err != nil {
+				return closure.Action{}, fmt.Errorf("oldObject: %w", err)
+			}
+			newObj, err := projectPayload(newU, info)
+			if err != nil {
+				return closure.Action{}, fmt.Errorf("object: %w", err)
+			}
+			if old != nil {
+				action.Target.UID = old.Ref.UID
+			}
+			action.Old, action.New = old, newObj
+		}
+		return action, nil
 	}
 
 	var verb closure.Verb
@@ -133,6 +172,22 @@ func cascadeFromOptions(raw []byte) bool {
 		return true
 	}
 	return opts.PropagationPolicy == nil || *opts.PropagationPolicy != metav1.DeletePropagationOrphan
+}
+
+// cascadeFromEviction reads Cascade from a decoded Eviction body's
+// deleteOptions.propagationPolicy (F8): Orphan leaves children alive → false; any other
+// policy, an absent deleteOptions, or an unreadable field cascades → true (the
+// conservative, larger closure). The Eviction body is the CREATE payload (newU), never
+// req.Options.
+func cascadeFromEviction(newU *unstructured.Unstructured) bool {
+	if newU == nil {
+		return true
+	}
+	pol, found, err := unstructured.NestedString(newU.Object, "deleteOptions", "propagationPolicy")
+	if err != nil || !found {
+		return true
+	}
+	return pol != string(metav1.DeletePropagationOrphan)
 }
 
 // projectPayload projects a decoded request payload into a closure.Object via

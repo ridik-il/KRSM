@@ -57,6 +57,7 @@ func newTestServer(t *testing.T, st closure.State, mode scope.Mode, opts ...func
 		ScopeInfo: testScope{},
 		Synced:    func() bool { return true },
 		Mode:      mode,
+		Fresh:     NoFreshness, // opts may override with a fake to exercise the guard
 		Logf:      func(string, ...any) {},
 	}
 	for _, o := range opts {

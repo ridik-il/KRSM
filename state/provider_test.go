@@ -18,9 +18,14 @@ func TestProviderImplementsState(_ *testing.T) {
 // through the Provider's discovery-derived GVR→GVK table — exact matches only, no
 // pluralisation guess, unknown resources fail closed (false).
 func TestProviderKindFor(t *testing.T) {
-	p := &Provider{targets: map[closure.GVK]cluster.Target{
-		depGVK: {GVR: corpusGVR["Deployment"], GVK: depGVK, Namespaced: true},
-	}}
+	p := &Provider{
+		targets: map[closure.GVK]cluster.Target{
+			depGVK: {GVR: corpusGVR["Deployment"], GVK: depGVK, Namespaced: true},
+		},
+		gvrToGVK: map[groupResource]closure.GVK{
+			{"apps", "deployments"}: depGVK,
+		},
+	}
 	gvk, ok := p.KindFor("apps", "deployments")
 	if !ok || gvk != depGVK {
 		t.Errorf("KindFor(apps, deployments) = (%v, %v), want (%v, true)", gvk, ok, depGVK)

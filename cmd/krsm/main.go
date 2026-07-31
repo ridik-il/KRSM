@@ -537,13 +537,7 @@ func writeDetail(w io.Writer, refs []closure.Ref) {
 	}
 }
 
-func joinRefs(refs []closure.Ref) string {
-	parts := make([]string, len(refs))
-	for i, r := range refs {
-		parts[i] = r.String()
-	}
-	return strings.Join(parts, ", ")
-}
+func joinRefs(refs []closure.Ref) string { return closure.JoinRefs(refs) }
 
 func joinScope(scope []closure.ScopeClause) string {
 	parts := make([]string, len(scope))
@@ -618,6 +612,7 @@ type serveOpts struct {
 	tlsCert, tlsKey      string
 	agentAnnotation      string
 	agentServiceAccounts string
+	gateAll              bool
 	kubeconfig           string
 	contextName          string
 	requestTimeout       time.Duration
@@ -636,11 +631,12 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&o.listen, "listen", ":8443", "TLS listen address")
 	fs.StringVar(&o.tlsCert, "tls-cert", "", "path to the serving certificate (required)")
 	fs.StringVar(&o.tlsKey, "tls-key", "", "path to the serving key (required)")
-	fs.StringVar(&o.agentAnnotation, "agent-annotation", "krsm.io/task", `annotation key gating which requests KRSM evaluates ("" = all; blind to scale/eviction/exec payloads — combine with --agent-serviceaccount)`)
+	fs.StringVar(&o.agentAnnotation, "agent-annotation", "krsm.io/task", `annotation key gating which requests KRSM evaluates ("" disables annotation matching; blind to scale/eviction/exec payloads — combine with --agent-serviceaccount)`)
 	fs.StringVar(&o.agentServiceAccounts, "agent-serviceaccount", "", `comma-separated usernames whose requests KRSM evaluates (e.g. system:serviceaccount:agents:remediator); identity-based, covers scale/eviction/exec`)
+	fs.BoolVar(&o.gateAll, "gate-all", false, "evaluate EVERY request regardless of annotation or identity (explicit match-all; overrides the annotation/serviceaccount matchers)")
 	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: in-cluster, then ~/.kube/config)")
 	fs.StringVar(&o.contextName, "context", "", "kubeconfig context")
-	fs.DurationVar(&o.requestTimeout, "request-timeout", 10*time.Second, "per-request deadline (keep below the webhook config's timeoutSeconds)")
+	fs.DurationVar(&o.requestTimeout, "request-timeout", webhook.DefaultRequestTimeout, "per-request deadline (must be > 0 and < 30s, the webhook config's timeoutSeconds ceiling)")
 	fs.DurationVar(&o.resync, "resync", 0, "informer resync period (0 = watch deltas only)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -652,35 +648,63 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	if mode != scope.ModeAudit && mode != scope.ModeEnforce {
 		return fmt.Errorf("serve: invalid --mode %q (want %q or %q)", o.mode, scope.ModeAudit, scope.ModeEnforce)
 	}
+	// A verdict computed past the API server's 30s timeoutSeconds ceiling can never be
+	// delivered, and a non-positive deadline would fire immediately (finding 7).
+	if o.requestTimeout <= 0 || o.requestTimeout >= 30*time.Second {
+		return fmt.Errorf("serve: --request-timeout must be > 0 and < 30s (the webhook timeoutSeconds ceiling), got %v", o.requestTimeout)
+	}
+	// Fail fast — BEFORE any cluster contact — when no gating signal is configured
+	// (finding 3: an all-empty config used to gate everything silently).
+	if _, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll); err != nil {
+		return err
+	}
 	return serveWebhook(o, mode, stdout, stderr)
 }
 
-// agentMatcher assembles the AgentMatcher from the serve flags: annotation-key
-// matching always applies; when --agent-serviceaccount names identities, requests
-// from those usernames are gated too (the annotation matcher is structurally blind
-// to scale/eviction/exec payloads — PR #36 review finding 1).
-func agentMatcher(annotationKey, serviceAccounts string) webhook.AgentMatcher {
-	annotation := webhook.AnnotationMatcher{Key: annotationKey}
-	if serviceAccounts == "" {
-		return annotation
+// agentMatcher assembles the AgentMatcher from the serve flags. --gate-all is the
+// explicit match-everything (overrides the rest); otherwise the non-empty signals
+// compose — a serviceaccount identity list (payload-free, covers scale/eviction/exec,
+// which the annotation matcher is structurally blind to) OR the task annotation. With NO
+// signal configured it is a usage error, never a silent gate-all (PR #36 finding 3).
+func agentMatcher(annotationKey, serviceAccounts string, gateAll bool) (webhook.AgentMatcher, error) {
+	if gateAll {
+		return webhook.MatchAll{}, nil
 	}
-	return webhook.AnyMatcher{webhook.NewServiceAccountMatcher(strings.Split(serviceAccounts, ",")), annotation}
+	var ms webhook.AnyMatcher
+	if serviceAccounts != "" {
+		ms = append(ms, webhook.NewServiceAccountMatcher(strings.Split(serviceAccounts, ",")))
+	}
+	if annotationKey != "" {
+		ms = append(ms, webhook.AnnotationMatcher{Key: annotationKey})
+	}
+	switch len(ms) {
+	case 0:
+		return nil, errors.New("serve: no agent gating signal — configure --agent-annotation, --agent-serviceaccount, or --gate-all")
+	case 1:
+		return ms[0], nil // a lone signal need not wrap in AnyMatcher
+	default:
+		return ms, nil
+	}
 }
 
 // buildWebhookConfig assembles the production webhook.Config from the flags and the
-// Provider. Pure and hermetically tested: webhook.New tolerates a nil Fresh (guard
-// disabled), so ONLY a test over this assembly catches a dropped field before it
-// silently disables the staleness guard in production (PR #36 review finding 9).
-func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider) webhook.Config {
+// Provider. Pure and hermetically tested: only a test over this assembly catches a
+// dropped field before it silently disables a safety collaborator in production (PR #36
+// review finding 9). It returns the same matcher usage error as the runServe fail-fast.
+func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider) (webhook.Config, error) {
+	matcher, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll)
+	if err != nil {
+		return webhook.Config{}, err
+	}
 	return webhook.Config{
 		State:     provider,
 		ScopeInfo: provider,
 		Synced:    provider.HasSynced,
 		Fresh:     provider,
 		Mode:      mode,
-		Matcher:   agentMatcher(o.agentAnnotation, o.agentServiceAccounts),
+		Matcher:   matcher,
 		Timeout:   o.requestTimeout,
-	}
+	}, nil
 }
 
 // serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
@@ -709,7 +733,11 @@ var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error
 		return errors.New("serve: informer caches did not sync (fail-closed: not serving)")
 	}
 
-	srv, err := webhook.New(buildWebhookConfig(o, mode, provider))
+	whCfg, err := buildWebhookConfig(o, mode, provider)
+	if err != nil {
+		return err
+	}
+	srv, err := webhook.New(whCfg)
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}

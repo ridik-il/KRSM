@@ -17,10 +17,11 @@ import (
 // generous; anything larger is not an admission request the gate should trust.
 const maxReviewBytes = 8 << 20
 
-// defaultRequestTimeout bounds one verdict (S1 #15). It must stay BELOW the
+// DefaultRequestTimeout bounds one verdict (S1 #15). It must stay BELOW the
 // ValidatingWebhookConfiguration's timeoutSeconds (max 30s) so KRSM answers with a
-// fail-closed deny instead of the API server timing the webhook out.
-const defaultRequestTimeout = 10 * time.Second
+// fail-closed deny instead of the API server timing the webhook out. Exported so the
+// serve command's --request-timeout default is the single source of this value.
+const DefaultRequestTimeout = 10 * time.Second
 
 // ServeHTTP is the impure edge around Handle: strict method/content-type/body gates,
 // the per-request deadline, panic recovery to a fail-closed deny, and JSON encoding.

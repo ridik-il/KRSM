@@ -31,6 +31,22 @@ func (testScope) KindFor(group, resource string) (closure.GVK, bool) {
 	return gvk, ok
 }
 
+// testTrackedKinds is the group+Kind set the webhook tests treat as informer-watched
+// (the corpus kinds the admission tests address). Version is ignored, mirroring the
+// real Provider.Tracked.
+var testTrackedKinds = map[[2]string]bool{
+	{"apps", "Deployment"}: true,
+	{"apps", "ReplicaSet"}: true,
+	{"", "Pod"}:            true,
+	{"", "Service"}:        true,
+	{"", "ConfigMap"}:      true,
+	{"", "Secret"}:         true,
+}
+
+func (testScope) Tracked(gvk closure.GVK) bool {
+	return testTrackedKinds[[2]string{gvk.Group, gvk.Kind}]
+}
+
 func raw(json string) runtime.RawExtension { return runtime.RawExtension{Raw: []byte(json)} }
 
 // actionFor decodes the request payloads exactly as Handle does (once), then maps the

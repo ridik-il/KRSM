@@ -25,7 +25,10 @@ func TestBuildWebhookConfig(t *testing.T) {
 		agentServiceAccounts: "system:serviceaccount:agents:remediator",
 		requestTimeout:       7 * time.Second,
 	}
-	cfg := buildWebhookConfig(o, scope.ModeEnforce, (*state.Provider)(nil))
+	cfg, err := buildWebhookConfig(o, scope.ModeEnforce, (*state.Provider)(nil))
+	if err != nil {
+		t.Fatalf("buildWebhookConfig: %v", err)
+	}
 
 	if cfg.State == nil || cfg.ScopeInfo == nil || cfg.Synced == nil {
 		t.Error("Config must wire State, ScopeInfo and Synced from the Provider")
@@ -44,9 +47,28 @@ func TestBuildWebhookConfig(t *testing.T) {
 	}
 
 	o.agentServiceAccounts = ""
-	cfg = buildWebhookConfig(o, scope.ModeAudit, (*state.Provider)(nil))
+	cfg, err = buildWebhookConfig(o, scope.ModeAudit, (*state.Provider)(nil))
+	if err != nil {
+		t.Fatalf("buildWebhookConfig (annotation only): %v", err)
+	}
 	if m, ok := cfg.Matcher.(webhook.AnnotationMatcher); !ok || m.Key != "krsm.io/task" {
 		t.Errorf("Matcher = %#v, want AnnotationMatcher{krsm.io/task} without --agent-serviceaccount", cfg.Matcher)
+	}
+
+	// --gate-all wires the explicit MatchAll, overriding the other signals.
+	o.gateAll = true
+	cfg, err = buildWebhookConfig(o, scope.ModeAudit, (*state.Provider)(nil))
+	if err != nil {
+		t.Fatalf("buildWebhookConfig (gate-all): %v", err)
+	}
+	if _, ok := cfg.Matcher.(webhook.MatchAll); !ok {
+		t.Errorf("Matcher = %T, want MatchAll with --gate-all", cfg.Matcher)
+	}
+
+	// No signal at all is a usage error, never a silent gate-all.
+	o.gateAll, o.agentAnnotation, o.agentServiceAccounts = false, "", ""
+	if _, err := buildWebhookConfig(o, scope.ModeAudit, (*state.Provider)(nil)); err == nil {
+		t.Error("no gating signal (no annotation, no serviceaccount, no --gate-all) must be a usage error")
 	}
 }
 
@@ -54,7 +76,10 @@ func TestBuildWebhookConfig(t *testing.T) {
 // request identity (payload-free — the scale/eviction/CONNECT signal) and everyone
 // else only via the annotation.
 func TestAgentMatcherIdentity(t *testing.T) {
-	m := agentMatcher("krsm.io/task", "system:serviceaccount:agents:remediator,system:serviceaccount:agents:scaler")
+	m, err := agentMatcher("krsm.io/task", "system:serviceaccount:agents:remediator,system:serviceaccount:agents:scaler", false)
+	if err != nil {
+		t.Fatalf("agentMatcher: %v", err)
+	}
 
 	agent := &admissionv1.AdmissionRequest{UserInfo: authenticationv1.UserInfo{Username: "system:serviceaccount:agents:scaler"}}
 	if !m.Matches(agent, nil, nil) {
