@@ -48,6 +48,20 @@ type Options struct {
 	Resync time.Duration
 }
 
+// splitTargets routes each discovered target to its informer flavour: metadataKinds
+// (Secret/ConfigMap) go METADATA-ONLY so their data never enters the process (C3);
+// everything else gets a full dynamic informer.
+func splitTargets(targets []cluster.Target) (full, meta []cluster.Target) {
+	for _, t := range targets {
+		if metadataKinds[t.GVK.Kind] {
+			meta = append(meta, t)
+		} else {
+			full = append(full, t)
+		}
+	}
+	return full, meta
+}
+
 // objectGetter does bounded, single-object live GETs for the staleness guard (FreshGet):
 // the dynamic client for normal kinds, the metadata client for metadata-only kinds. It is
 // read-only (only Get) and never lists — the O(d) on-demand fallback of ADR-0004.
@@ -58,13 +72,14 @@ type objectGetter struct {
 
 // Provider is the informer-backed indexed closure.State.
 type Provider struct {
-	idx     *index
-	scope   cluster.ScopeInfo
-	starts  []func(stopCh <-chan struct{})
-	syncs   []cache.InformerSynced
-	synced  atomic.Bool
-	getter  objectGetter                   // dynamic + metadata clients for FreshGet
-	targets map[closure.GVK]cluster.Target // GVK → GVR/namespaced, for FreshGet resolution
+	idx      *index
+	scope    cluster.ScopeInfo
+	starts   []func(stopCh <-chan struct{})
+	syncs    []cache.InformerSynced
+	synced   atomic.Bool
+	getter   objectGetter                   // dynamic + metadata clients for FreshGet
+	targets  map[closure.GVK]cluster.Target // GVK → GVR/namespaced, for FreshGet resolution
+	gvrToGVK map[groupResource]closure.GVK  // (group, resource) → GVK, O(1) KindFor
 
 	// projectFailures counts informer events whose object failed cluster.Project and so
 	// could NOT update the indexes — each one is a potential under-inclusive (stale)
@@ -89,14 +104,7 @@ func New(cfg *rest.Config, opts Options) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	var full, meta []cluster.Target
-	for _, t := range targets {
-		if metadataKinds[t.GVK.Kind] {
-			meta = append(meta, t)
-		} else {
-			full = append(full, t)
-		}
-	}
+	full, meta := splitTargets(targets)
 
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -125,10 +133,11 @@ func newProvider(
 	scope cluster.ScopeInfo,
 	getter objectGetter,
 ) (*Provider, error) {
-	p := &Provider{idx: newIndex(), scope: scope, getter: getter, targets: map[closure.GVK]cluster.Target{}}
+	p := &Provider{idx: newIndex(), scope: scope, getter: getter, targets: map[closure.GVK]cluster.Target{}, gvrToGVK: map[groupResource]closure.GVK{}}
 
 	for _, t := range fullTargets {
 		p.targets[t.GVK] = t
+		p.gvrToGVK[groupResource{t.GVR.Group, t.GVR.Resource}] = t.GVK
 		inf := dynFactory.ForResource(t.GVR).Informer()
 		reg, err := inf.AddEventHandler(p.dynamicHandler())
 		if err != nil {
@@ -138,6 +147,7 @@ func newProvider(
 	}
 	for _, t := range metaTargets {
 		p.targets[t.GVK] = t
+		p.gvrToGVK[groupResource{t.GVR.Group, t.GVR.Resource}] = t.GVK
 		inf := metaFactory.ForResource(t.GVR).Informer()
 		reg, err := inf.AddEventHandler(p.metadataHandler(t.GVK))
 		if err != nil {
@@ -419,6 +429,35 @@ func (p *Provider) targetFor(gvk closure.GVK) (cluster.Target, bool) {
 	return cluster.Target{}, false
 }
 
+// Namespaced exposes the discovery-derived scope (cluster.ScopeInfo) so the webhook
+// projects request payloads through the IDENTICAL projection the informers use.
+func (p *Provider) Namespaced(gvk closure.GVK) (bool, bool) { return p.scope.Namespaced(gvk) }
+
+// groupResource keys the O(1) GVR→GVK reverse index (built once in newProvider).
+type groupResource struct{ group, resource string }
+
+// KindFor resolves a tracked GVR (group + resource) to its GVK — the EXACT,
+// discovery-derived mapping the webhook needs for sub-resource parents (scale/
+// eviction), never a pluralisation guess. O(1) via the reverse index; unknown
+// resources report false.
+func (p *Provider) KindFor(group, resource string) (closure.GVK, bool) {
+	gvk, ok := p.gvrToGVK[groupResource{group, resource}]
+	return gvk, ok
+}
+
+// Tracked reports whether the informer set watches gvk's kind, matched by group+Kind
+// (version-insensitive): informers watch preferred versions, but an admission request
+// may arrive via any served version, so an exact-GVK test would falsely deny a
+// non-preferred version of a tracked kind (round-2 finding 4).
+func (p *Provider) Tracked(gvk closure.GVK) bool {
+	for k := range p.targets {
+		if k.Group == gvk.Group && k.Kind == gvk.Kind {
+			return true
+		}
+	}
+	return false
+}
+
 // stalenessReason is the single, credential-free reason a verdict is denied because the
 // cache could not be confirmed current against the request (ADR-0004 fail-closed).
 const stalenessReason = "could not confirm current state"
@@ -434,17 +473,19 @@ func (e *StalenessError) Error() string { return stalenessReason }
 // closure neighbourhood (the O(d) members the verdict depends on), it confirms the index
 // is current enough to trust:
 //
-//   - in sync (cache ≥ request rv) → returns nil with NO API call (the read-free hot path);
+//   - in sync (cache ≥ request rv) → returns (false, nil) with NO API call (the read-free
+//     steady-state hot path — nothing reconciled, so the caller need not recompute);
 //   - drift (cache older/absent) → a bounded FreshGet over {target} ∪ neighbourhood to
-//     reconcile the cache (never a re-list); if the target still cannot be reconciled to
-//     the request rv → *StalenessError (the caller fails closed).
-func (p *Provider) CheckFreshness(ctx context.Context, target closure.Ref, targetRV string, neighbourhood []closure.Ref) error {
+//     reconcile the cache (never a re-list); returns (true, nil) when any member was
+//     upserted (the caller recomputes over the refreshed cache); if the target still
+//     cannot be reconciled to the request rv → (false, *StalenessError) (fail closed).
+func (p *Provider) CheckFreshness(ctx context.Context, target closure.Ref, targetRV string, neighbourhood []closure.Ref) (bool, error) {
 	if cachedRV, ok := p.idx.rvFor(target); ok && inSync(cachedRV, targetRV) {
-		return nil
+		return false, nil
 	}
 	targetKey := objKey(target)
 	var reconciledRV string
-	var targetFound bool
+	var targetFound, reconciled bool
 	seen := map[string]bool{}
 	for _, r := range append([]closure.Ref{target}, neighbourhood...) {
 		k := objKey(r)
@@ -454,19 +495,20 @@ func (p *Provider) CheckFreshness(ctx context.Context, target closure.Ref, targe
 		seen[k] = true
 		obj, rv, found, err := p.freshGet(ctx, r)
 		if err != nil {
-			return &StalenessError{Ref: target}
+			return false, &StalenessError{Ref: target}
 		}
 		if found {
 			p.idx.upsertWithRV(obj, rv)
+			reconciled = true
 		}
 		if k == targetKey {
 			targetFound, reconciledRV = found, rv
 		}
 	}
 	if !targetFound || !inSync(reconciledRV, targetRV) {
-		return &StalenessError{Ref: target}
+		return false, &StalenessError{Ref: target}
 	}
-	return nil
+	return reconciled, nil
 }
 
 // inSync reports whether a cache entry at cachedRV is current for a request whose

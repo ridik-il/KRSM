@@ -8,10 +8,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -26,6 +28,8 @@ import (
 	"github.com/ridik-il/krsm/internal/cluster"
 	"github.com/ridik-il/krsm/internal/scenario"
 	"github.com/ridik-il/krsm/scope"
+	"github.com/ridik-il/krsm/state"
+	"github.com/ridik-il/krsm/webhook"
 )
 
 // version is overridden at release time via -ldflags "-X main.version=...".
@@ -74,6 +78,15 @@ Commands:
                           <Kind/name> [-n ns]. See "krsm check --help".
                           --plain emits ASCII without emoji; --mode
                           audit|enforce governs scope-escape handling.
+  serve [flags]           Run the ValidatingWebhook server (audit-first) against
+                          the informer-backed indexed state. Requires --tls-cert
+                          and --tls-key; --mode audit|enforce (default audit);
+                          --listen (default :8443); --agent-annotation gates
+                          which requests KRSM evaluates (default krsm.io/task;
+                          "" gates everything); --agent-serviceaccount gates by
+                          request identity (required for scale/eviction/exec —
+                          those payloads cannot carry annotations). Fails closed
+                          on unsynced cache, staleness, timeout, or any error.
   version                 Print the krsm version
   help                    Show this help
 
@@ -148,6 +161,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stdout, usage)
 	case "check":
 		return runCheck(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q (try \"krsm help\")", cmd)
 	}
@@ -522,13 +537,7 @@ func writeDetail(w io.Writer, refs []closure.Ref) {
 	}
 }
 
-func joinRefs(refs []closure.Ref) string {
-	parts := make([]string, len(refs))
-	for i, r := range refs {
-		parts[i] = r.String()
-	}
-	return strings.Join(parts, ", ")
-}
+func joinRefs(refs []closure.Ref) string { return closure.JoinRefs(refs) }
 
 func joinScope(scope []closure.ScopeClause) string {
 	parts := make([]string, len(scope))
@@ -594,4 +603,170 @@ func selectorStr(sel closure.LabelSelector) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// serveOpts are the parsed `krsm serve` flags.
+type serveOpts struct {
+	mode                 string
+	listen               string
+	tlsCert, tlsKey      string
+	agentAnnotation      string
+	agentServiceAccounts string
+	gateAll              bool
+	kubeconfig           string
+	contextName          string
+	requestTimeout       time.Duration
+	resync               time.Duration
+}
+
+// runServe validates the serve flags FAIL-FAST (a webhook without TLS material or a
+// known mode must not start), then builds the informer Provider, waits for the caches
+// to sync (an unsynced cache never serves — DESIGN §5), and serves the admission
+// endpoint over TLS until SIGINT/SIGTERM.
+func runServe(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var o serveOpts
+	fs.StringVar(&o.mode, "mode", string(scope.ModeAudit), "verdict mode: audit (default, ADR-0011) or enforce")
+	fs.StringVar(&o.listen, "listen", ":8443", "TLS listen address")
+	fs.StringVar(&o.tlsCert, "tls-cert", "", "path to the serving certificate (required)")
+	fs.StringVar(&o.tlsKey, "tls-key", "", "path to the serving key (required)")
+	fs.StringVar(&o.agentAnnotation, "agent-annotation", "krsm.io/task", `annotation key gating which requests KRSM evaluates ("" disables annotation matching; blind to scale/eviction/exec payloads — combine with --agent-serviceaccount)`)
+	fs.StringVar(&o.agentServiceAccounts, "agent-serviceaccount", "", `comma-separated usernames whose requests KRSM evaluates (e.g. system:serviceaccount:agents:remediator); identity-based, covers scale/eviction/exec`)
+	fs.BoolVar(&o.gateAll, "gate-all", false, "evaluate EVERY request regardless of annotation or identity (explicit match-all; overrides the annotation/serviceaccount matchers)")
+	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: in-cluster, then ~/.kube/config)")
+	fs.StringVar(&o.contextName, "context", "", "kubeconfig context")
+	fs.DurationVar(&o.requestTimeout, "request-timeout", webhook.DefaultRequestTimeout, "per-request deadline (must be > 0 and < 30s, the webhook config's timeoutSeconds ceiling)")
+	fs.DurationVar(&o.resync, "resync", 0, "informer resync period (0 = watch deltas only)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if o.tlsCert == "" || o.tlsKey == "" {
+		return errors.New("serve: --tls-cert and --tls-key are required (the webhook never serves plaintext)")
+	}
+	mode := scope.Mode(o.mode)
+	if mode != scope.ModeAudit && mode != scope.ModeEnforce {
+		return fmt.Errorf("serve: invalid --mode %q (want %q or %q)", o.mode, scope.ModeAudit, scope.ModeEnforce)
+	}
+	// A verdict computed past the API server's 30s timeoutSeconds ceiling can never be
+	// delivered, and a non-positive deadline would fire immediately (finding 7).
+	if o.requestTimeout <= 0 || o.requestTimeout >= 30*time.Second {
+		return fmt.Errorf("serve: --request-timeout must be > 0 and < 30s (the webhook timeoutSeconds ceiling), got %v", o.requestTimeout)
+	}
+	// Fail fast — BEFORE any cluster contact — when no gating signal is configured
+	// (finding 3: an all-empty config used to gate everything silently).
+	if _, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll); err != nil {
+		return err
+	}
+	return serveWebhook(o, mode, stdout, stderr)
+}
+
+// agentMatcher assembles the AgentMatcher from the serve flags. --gate-all is the
+// explicit match-everything (overrides the rest); otherwise the non-empty signals
+// compose — a serviceaccount identity list (payload-free, covers scale/eviction/exec,
+// which the annotation matcher is structurally blind to) OR the task annotation. With NO
+// signal configured it is a usage error, never a silent gate-all (PR #36 finding 3).
+func agentMatcher(annotationKey, serviceAccounts string, gateAll bool) (webhook.AgentMatcher, error) {
+	if gateAll {
+		return webhook.MatchAll{}, nil
+	}
+	var ms webhook.AnyMatcher
+	if serviceAccounts != "" {
+		ms = append(ms, webhook.NewServiceAccountMatcher(strings.Split(serviceAccounts, ",")))
+	}
+	if annotationKey != "" {
+		ms = append(ms, webhook.AnnotationMatcher{Key: annotationKey})
+	}
+	switch len(ms) {
+	case 0:
+		return nil, errors.New("serve: no agent gating signal — configure --agent-annotation, --agent-serviceaccount, or --gate-all")
+	case 1:
+		return ms[0], nil // a lone signal need not wrap in AnyMatcher
+	default:
+		return ms, nil
+	}
+}
+
+// buildWebhookConfig assembles the production webhook.Config from the flags and the
+// Provider. Pure and hermetically tested: only a test over this assembly catches a
+// dropped field before it silently disables a safety collaborator in production (PR #36
+// review finding 9). It returns the same matcher usage error as the runServe fail-fast.
+func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider) (webhook.Config, error) {
+	matcher, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll)
+	if err != nil {
+		return webhook.Config{}, err
+	}
+	return webhook.Config{
+		State:     provider,
+		ScopeInfo: provider,
+		Synced:    provider.HasSynced,
+		Fresh:     provider,
+		Mode:      mode,
+		Matcher:   matcher,
+		Timeout:   o.requestTimeout,
+	}, nil
+}
+
+// serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
+// TLS listener, graceful shutdown. Kept separate so flag validation is hermetic.
+var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error {
+	reloader, err := webhook.NewCertReloader(o.tlsCert, o.tlsKey)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
+	cfg, err := restConfig(o.kubeconfig, o.contextName)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	provider, err := state.New(cfg, state.Options{Resync: o.resync})
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	provider.Start(ctx)
+	fmt.Fprintln(stdout, "krsm serve: waiting for informer caches to sync…")
+	if !provider.WaitForCacheSync(ctx) {
+		return errors.New("serve: informer caches did not sync (fail-closed: not serving)")
+	}
+
+	whCfg, err := buildWebhookConfig(o, mode, provider)
+	if err != nil {
+		return err
+	}
+	srv, err := webhook.New(whCfg)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
+	httpSrv := &http.Server{
+		Addr:              o.listen,
+		Handler:           webhook.NewMux(srv),
+		TLSConfig:         &tls.Config{GetCertificate: reloader.GetCertificate, MinVersion: tls.VersionTLS12},
+		ReadHeaderTimeout: 10 * time.Second,
+		// Bound the whole request/response, not just the headers: without these a
+		// client that trickles its body (or never reads the response) holds a
+		// connection and goroutine forever — the handler's own deadline starts
+		// only after the body is fully read (PR #36 review finding 6). 30s is the
+		// ValidatingWebhookConfiguration timeoutSeconds ceiling.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  90 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
+
+	fmt.Fprintf(stdout, "krsm serve: mode=%s listening on %s\n", mode, o.listen)
+	if err := httpSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", err)
+	}
+	fmt.Fprintln(stdout, "krsm serve: shut down")
+	return nil
 }

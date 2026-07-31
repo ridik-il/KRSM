@@ -119,8 +119,12 @@ func TestInSyncNoFreshGet(t *testing.T) {
 	if !ok {
 		t.Fatal("informer did not populate the resourceVersion in the index")
 	}
-	if err := p.CheckFreshness(context.Background(), ref, cachedRV, nil); err != nil {
+	reconciled, err := p.CheckFreshness(context.Background(), ref, cachedRV, nil)
+	if err != nil {
 		t.Fatalf("CheckFreshness(in-sync) = %v, want nil", err)
+	}
+	if reconciled {
+		t.Error("in-sync fast path must report reconciled=false (nothing upserted)")
 	}
 	if hasVerb(dyn.Actions(), "get") || hasVerb(meta.Actions(), "get") {
 		t.Errorf("in-sync request must not trigger any live GET (dyn=%v meta=%v)", dyn.Actions(), meta.Actions())
@@ -146,8 +150,12 @@ func TestDriftTriggersBoundedFreshGet(t *testing.T) {
 	p.idx.upsertWithRV(closure.Object{Ref: depRef}, "1")
 	p.idx.upsertWithRV(closure.Object{Ref: cmRef}, "1")
 
-	if err := p.CheckFreshness(context.Background(), depRef, "2", []closure.Ref{cmRef}); err != nil {
+	reconciled, err := p.CheckFreshness(context.Background(), depRef, "2", []closure.Ref{cmRef})
+	if err != nil {
 		t.Fatalf("CheckFreshness(reconcilable drift) = %v, want nil", err)
+	}
+	if !reconciled {
+		t.Error("a drift that upserts the cache must report reconciled=true")
 	}
 	if !hasVerb(dyn.Actions(), "get") {
 		t.Error("drift must trigger a bounded FreshGet on the dynamic client")
@@ -168,7 +176,7 @@ func TestUnresolvedDriftFailsClosed(t *testing.T) {
 	depRef := closure.Ref{GVK: depGVK, Namespace: "prod", Name: "web", UID: "uid:dep"}
 	p.idx.upsertWithRV(closure.Object{Ref: depRef}, "1")
 
-	err := p.CheckFreshness(context.Background(), depRef, "5", nil) // … but the request is at rv=5
+	_, err := p.CheckFreshness(context.Background(), depRef, "5", nil) // … but the request is at rv=5
 	var se *StalenessError
 	if !errors.As(err, &se) {
 		t.Fatalf("CheckFreshness(unresolved drift) = %v, want *StalenessError", err)
@@ -196,7 +204,7 @@ func TestStalenessReasonCredentialFree(t *testing.T) {
 	secRef := closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Secret"}, Namespace: "prod", Name: "db", UID: "uid:sec"}
 	p.idx.upsertWithRV(closure.Object{Ref: depRef}, "1")
 
-	err := p.CheckFreshness(context.Background(), depRef, "9", []closure.Ref{secRef}) // unreachable rv → fail closed
+	_, err := p.CheckFreshness(context.Background(), depRef, "9", []closure.Ref{secRef}) // unreachable rv → fail closed
 	if err == nil {
 		t.Fatal("expected a fail-closed StalenessError")
 	}

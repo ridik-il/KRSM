@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Webhook slice-5 round-2 hardening (PR #36).** Closed the round-2 review's
+  under/over-gating findings and protocol nits on the admission path:
+  - `pods/ephemeralcontainers` is now gated as an `Update` on the parent pod (was
+    admitted payload-free) — an agent injecting a debug container into an out-of-scope
+    pod is flagged/denied.
+  - Agent matching is two-stage and identity-first: `AgentMatcher.NeedsPayload()`,
+    `ServiceAccountMatcher` list entries are trimmed, `AnnotationMatcher{Key:""}` now
+    matches **nothing**, and match-everything is the explicit `MatchAll` / `--gate-all`.
+    `krsm serve` fails fast when no gating signal is configured. **Breaking (pre-release):**
+    `--agent-annotation ""` no longer means "gate all".
+  - New fail-closed taxonomy code `untracked` for kinds the informer set does not watch
+    (distinct from `not-ready`/`escape`; group+Kind match).
+  - `--request-timeout` is validated (`0 < d < 30s`); eviction cascade is read from the
+    Eviction body's `deleteOptions.propagationPolicy`; the response echoes the request's
+    `AdmissionReview` TypeMeta (v1beta1-safe); the freshness guard recomputes only when
+    it actually reconciled the cache; TLS cert reload picks up rotations of either file.
+
 ## [0.4.0] - 2026-06-24
 
 ### Added
