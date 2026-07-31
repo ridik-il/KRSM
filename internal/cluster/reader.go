@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,25 +98,32 @@ type listTargets = []schema.GroupVersionResource
 // State lists the relevant GVKs read-only, projects them through BuildObjects, and
 // returns a closure.State. Fail-closed on any discovery or list error.
 func (r *Reader) State(ctx context.Context) (closure.State, error) {
-	_, lists, err := r.disc.ServerGroupsAndResources()
+	// Scope (the per-GVK namespaced flag) needs EVERY served version, so it reads the
+	// all-version ServerGroupsAndResources answer.
+	lists, err := serverResources(r.disc)
 	if err != nil {
-		return nil, fmt.Errorf("discover server resources: %w", err)
+		return nil, err
 	}
-
 	scope := scopeFromLists(lists)
-	targets, err := selectTargets(lists)
+
+	// LIST targets read the SERVER-PREFERRED version only (S3), so a resource served at
+	// several versions (e.g. HPA at autoscaling/v1 and /v2) is listed once, not per version.
+	preferred, err := serverPreferredResources(r.disc)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := selectTargets(preferred)
 	if err != nil {
 		return nil, err
 	}
 
 	var objs []unstructured.Unstructured
 	for _, t := range targets {
-		// Resource(...).List is the ONLY dynamic verb this package invokes — read-only.
-		ul, err := r.dyn.Resource(t).List(ctx, metav1.ListOptions{})
+		items, err := r.listAll(ctx, t)
 		if err != nil {
 			return nil, fmt.Errorf("list %s: %w", t.Resource, err)
 		}
-		objs = append(objs, ul.Items...)
+		objs = append(objs, items...)
 	}
 
 	built, err := BuildObjects(objs, scope)
@@ -124,29 +133,77 @@ func (r *Reader) State(ctx context.Context) (closure.State, error) {
 	return closure.NewScanState(built), nil
 }
 
-// ResolveKind maps a user-supplied <Kind> token to the canonical Kind discovery
-// reports. The CLI target has no uid, so the live State resolves it by its human key
-// (Kind/ns/name) and closure.Ref.human renders GVK.Kind verbatim — so the Kind must
-// equal the live object's `kind` field exactly. An operator may type the canonical
-// Kind, a lowercased kind, or the plural/singular resource name; ResolveKind accepts
-// any (case-insensitively) and returns the one canonical Kind.
+// listPageLimit is the per-page bound for the dynamic List (C3): a single check must not
+// pull every object of a kind in one unbounded call. 500 matches kubectl's default page
+// size — large enough to keep round-trips few, small enough to bound memory/latency.
+const listPageLimit = 500
+
+// listAll lists every object of gvr READ-ONLY across pages, following the Continue token
+// until the server reports no more. It is the ONLY place this package reads objects and
+// uses only Resource(...).List — no write verb. Any page error is returned (the caller
+// fails closed); a partial accumulation is never returned alongside an error.
+func (r *Reader) listAll(ctx context.Context, gvr schema.GroupVersionResource) ([]unstructured.Unstructured, error) {
+	var out []unstructured.Unstructured
+	cont := ""
+	for {
+		ul, err := r.dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: listPageLimit, Continue: cont})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ul.Items...)
+		cont = ul.GetContinue()
+		if cont == "" {
+			return out, nil
+		}
+	}
+}
+
+// ResolveKind maps a user-supplied <Kind> token (optionally qualified by an API group)
+// to the canonical Kind discovery reports. The CLI target has no uid, so the live State
+// resolves it by its human key (Kind/ns/name) and closure.Ref.human renders GVK.Kind
+// verbatim — so the returned Kind must equal the live object's `kind` field exactly. An
+// operator may type the canonical Kind, a lowercased kind, or the plural/singular resource
+// name; matching is case-insensitive.
 //
-// It FAILS CLOSED: a discovery error is returned (never a guessed Kind), and a token
-// matching no discovered resource is an error (the operator named a kind the cluster
-// does not have) rather than a silent pass-through that would resolve no target.
-func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
+// group + qualified disambiguate a Kind served by more than one API group — the
+// CRD-heavy-cluster collision S2 (#16) addresses:
+//   - qualified: resolve the resource in THAT group only — including the CORE group when
+//     group == "" (the CLI's trailing-dot form, "Event./name", the only way to select the
+//     core Event when events.k8s.io also serves one); fail closed if no such Kind is
+//     served there (never fall back to another group).
+//   - unqualified and the Kind is served by exactly one group: resolve it (the common
+//     case, unchanged — multiple served VERSIONS of one group still count as one group).
+//   - unqualified and the Kind is served by MORE THAN ONE group: FAIL CLOSED, listing the
+//     candidate groups, rather than silently picking whichever discovery enumerated first.
+//     Every suggested qualifier is typeable, including "Kind." for the core group.
+//
+// It FAILS CLOSED throughout: a discovery error is returned (never a guessed Kind), and a
+// token matching no discovered resource is an error.
+//
+// Residual (documented): the returned target carries only the canonical Kind —
+// closure.Ref.human is group-agnostic by design (the goldens depend on it), so two
+// same-Kind objects in different groups sharing a namespace/name still share a human key in
+// the engine. The qualifier removes the *silent wrong-GVR* footgun on the CLI; the webhook's
+// uid-based match (a later slice) is the complete fix.
+func (r *Reader) ResolveKind(_ context.Context, kind, group string, qualified bool) (string, error) {
 	// Discovery (ServerGroupsAndResources) takes no context today; the ctx parameter
 	// keeps the signature uniform with State and ready for a context-aware RESTMapper.
-	_, lists, err := r.disc.ServerGroupsAndResources()
+	lists, err := serverResources(r.disc)
 	if err != nil {
-		return "", fmt.Errorf("discover server resources: %w", err)
+		return "", err
 	}
-	want := strings.ToLower(token)
-	// First match wins. A Kind served by multiple GroupVersions (e.g. an apps/v1 and a
-	// legacy version) yields the SAME Kind string, and the downstream human key
-	// (Ref.human → Kind/ns/name) is group/version-agnostic, so resolving to a preferred
-	// version would gain nothing — deliberately not a preferred-version lookup.
+	want := strings.ToLower(kind)
+
+	// Collect the canonical Kind keyed by API group for every discovered resource the token
+	// matches (canonical Kind, lowercased kind, or plural/singular resource name), skipping
+	// subresources. Keying by group collapses multiple served versions of one group to a
+	// single entry, so multi-version (not multi-group) is never treated as ambiguous.
+	matches := map[string]string{} // group → canonical Kind
 	for _, list := range lists {
+		gv, err := schema.ParseGroupVersion(list.GroupVersion)
+		if err != nil {
+			continue
+		}
 		for _, res := range list.APIResources {
 			if isSubresource(res.Name) {
 				continue
@@ -154,11 +211,42 @@ func (r *Reader) ResolveKind(_ context.Context, token string) (string, error) {
 			if want == strings.ToLower(res.Kind) ||
 				want == strings.ToLower(res.Name) ||
 				(res.SingularName != "" && want == strings.ToLower(res.SingularName)) {
-				return res.Kind, nil
+				matches[gv.Group] = res.Kind
 			}
 		}
 	}
-	return "", fmt.Errorf("unknown kind %q: no such resource in the cluster's API discovery", token)
+
+	if qualified {
+		if canonical, ok := matches[group]; ok {
+			return canonical, nil
+		}
+		if group == "" {
+			return "", fmt.Errorf("kind %q is not served by the core API group in the cluster's API discovery", kind)
+		}
+		return "", fmt.Errorf("kind %q is not served by API group %q in the cluster's API discovery", kind, group)
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("unknown kind %q: no such resource in the cluster's API discovery", kind)
+	case 1:
+		for _, canonical := range matches {
+			return canonical, nil
+		}
+	}
+
+	// Ambiguous across groups: require an explicit qualifier rather than guess.
+	groups := make([]string, 0, len(matches))
+	for g := range matches {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	suggestions := make([]string, len(groups))
+	for i, g := range groups {
+		// "Kind." (trailing dot) is the typeable qualifier for the core (empty) group.
+		suggestions[i] = kind + "." + g
+	}
+	return "", fmt.Errorf("kind %q is ambiguous across API groups %v; qualify the target as one of %v", kind, groups, suggestions)
 }
 
 // selectTargets picks the GVRs to list: every discovered resource whose kind is a
@@ -257,11 +345,77 @@ func scopeFromLists(lists []*metav1.APIResourceList) ScopeInfo {
 // resources. It FAILS CLOSED on a discovery error — never returning a partial/empty
 // scope that would silently treat every GVK as unknown.
 func newDiscoveryScope(disc discovery.DiscoveryInterface) (ScopeInfo, error) {
-	_, lists, err := disc.ServerGroupsAndResources()
+	lists, err := serverResources(disc)
 	if err != nil {
-		return nil, fmt.Errorf("discover server resources: %w", err)
+		return nil, err
 	}
 	return scopeFromLists(lists), nil
+}
+
+// serverResources lists the cluster's API resources with PARTIAL-DISCOVERY TOLERANCE
+// (C1, docs/design/v0.5-c1-partial-discovery.md). ServerGroupsAndResources returns a
+// non-nil *discovery.ErrGroupDiscoveryFailed whenever an aggregated APIService is
+// momentarily unavailable (metrics-server rolling, a flaky custom-metrics adapter, a
+// webhook-backed group unreachable) WHILE STILL returning every group it could resolve.
+// Treating that as fatal — the pre-C1 behaviour — denied every action the moment an
+// unrelated aggregated API hiccupped, the single biggest real-world blocker.
+//
+// So: on ErrGroupDiscoveryFailed, KEEP the resolved lists and fail closed ONLY if a
+// closure-relevant (built-in) group is among the failed set — an aggregated metrics API
+// failing must not deny a `delete deployment`. Any OTHER error type stays fatal
+// (unchanged fail-closed behaviour). The error names only the failed groups, never any
+// credential material (the *rest.Config is never echoed).
+func serverResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceList, error) {
+	_, lists, err := disc.ServerGroupsAndResources()
+	if err != nil {
+		var gdf *discovery.ErrGroupDiscoveryFailed
+		if !errors.As(err, &gdf) {
+			return nil, fmt.Errorf("discover server resources: %w", err)
+		}
+		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
+			return nil, fmt.Errorf("discover server resources: closure-relevant API group(s) unavailable: %v", relevant)
+		}
+		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
+	}
+	return lists, nil
+}
+
+// serverPreferredResources lists one APIResourceList per resource at its SERVER-PREFERRED
+// version (S3), with the SAME partial-discovery tolerance as serverResources (C1): keep the
+// resolved lists, fail closed only if a closure-relevant (built-in) group is among the
+// failed set. It is used to pick LIST targets so a multi-version resource is listed once;
+// the all-version ServerGroupsAndResources answer still feeds the namespaced-scope map.
+func serverPreferredResources(disc discovery.DiscoveryInterface) ([]*metav1.APIResourceList, error) {
+	lists, err := disc.ServerPreferredResources()
+	if err != nil {
+		var gdf *discovery.ErrGroupDiscoveryFailed
+		if !errors.As(err, &gdf) {
+			return nil, fmt.Errorf("discover preferred resources: %w", err)
+		}
+		if relevant := closureRelevantFailures(gdf); len(relevant) > 0 {
+			return nil, fmt.Errorf("discover preferred resources: closure-relevant API group(s) unavailable: %v", relevant)
+		}
+		// Only aggregated/add-on groups failed; proceed on the groups discovery resolved.
+	}
+	return lists, nil
+}
+
+// closureRelevantFailures returns the built-in GroupVersions among a partial-discovery
+// failure. A built-in group hosts the closure relations (readTargets) and is served by
+// the core kube-apiserver, so its discovery failing signals a real incompleteness and
+// must fail closed. Non-built-in failures (aggregated metrics APIs, add-on/webhook
+// groups) carry no closure relation and are tolerated (the accepted C1 trade-off: a
+// simultaneously-failing CRD group that hosts an ownerReference participant degrades to a
+// tolerated partial read rather than the unusable fail-closed-on-any-hiccup behaviour —
+// see the design note's residual-risk section).
+func closureRelevantFailures(gdf *discovery.ErrGroupDiscoveryFailed) []schema.GroupVersion {
+	var relevant []schema.GroupVersion
+	for gv := range gdf.Groups {
+		if builtInGroups[gv.Group] {
+			relevant = append(relevant, gv)
+		}
+	}
+	return relevant
 }
 
 // discoveryScope is a ScopeInfo backed by a discovery-built GVK→namespaced map. A GVK

@@ -154,17 +154,46 @@ func TestExtractNamespace(t *testing.T) {
 // target" usage error, so a malformed target never reaches kind resolution or the
 // engine. This is the one place the target form is validated (no duplicate re-check).
 func TestSplitTargetRejects(t *testing.T) {
-	for _, target := range []string{"Deployment", "Deployment/", "/web", ""} {
-		if _, _, err := splitTarget(target); err == nil {
+	for _, target := range []string{"Deployment", "Deployment/", "/web", "", ".apps/web"} {
+		if _, _, _, _, err := splitTarget(target); err == nil {
 			t.Errorf("splitTarget(%q) = nil error, want an invalid-target error", target)
 		}
 	}
-	kind, name, err := splitTarget("Deployment/web")
+	kind, group, name, qualified, err := splitTarget("Deployment/web")
 	if err != nil {
 		t.Fatalf("splitTarget(Deployment/web) = %v, want nil", err)
 	}
-	if kind != "Deployment" || name != "web" {
-		t.Errorf("splitTarget(Deployment/web) = (%q, %q), want (Deployment, web)", kind, name)
+	if kind != "Deployment" || group != "" || qualified || name != "web" {
+		t.Errorf("splitTarget(Deployment/web) = (%q, %q, %v, %q), want (Deployment, \"\", false, web)", kind, group, qualified, name)
+	}
+}
+
+// TestSplitTargetParsesGroupQualifier (S2 #16): the target accepts an optional ".group"
+// on the Kind — "<Kind>.<group>/<name>" — so an operator can disambiguate a Kind served
+// by multiple API groups. The group is split on the FIRST ".", so a multi-dot group
+// (example.com) is preserved. A trailing dot ("Event./warn") qualifies the CORE (empty)
+// group explicitly — it MUST round-trip, because ResolveKind's ambiguity error suggests
+// exactly that form when the core group is one of the colliding groups (the stock-cluster
+// Event collision: core + events.k8s.io).
+func TestSplitTargetParsesGroupQualifier(t *testing.T) {
+	cases := []struct {
+		in, kind, group, name string
+		qualified             bool
+	}{
+		{"Deployment.apps/web", "Deployment", "apps", "web", true},
+		{"Cluster.infra.example.com/c1", "Cluster", "infra.example.com", "c1", true},
+		{"Deployment/web", "Deployment", "", "web", false},
+		{"Event./warn", "Event", "", "warn", true},
+	}
+	for _, c := range cases {
+		kind, group, name, qualified, err := splitTarget(c.in)
+		if err != nil {
+			t.Fatalf("splitTarget(%q) = %v, want nil", c.in, err)
+		}
+		if kind != c.kind || group != c.group || qualified != c.qualified || name != c.name {
+			t.Errorf("splitTarget(%q) = (%q, %q, %v, %q), want (%q, %q, %v, %q)",
+				c.in, kind, group, qualified, name, c.kind, c.group, c.qualified, c.name)
+		}
 	}
 }
 
@@ -176,20 +205,28 @@ type fakeLiveReader struct {
 	kind     string
 	stateErr error
 	kindErr  error
+	// stateBlocks models a hung API server: State waits for the request context to be
+	// cancelled (deadline or signal) and returns its error, so the S1 timeout path can be
+	// exercised hermetically.
+	stateBlocks bool
 }
 
-func (f *fakeLiveReader) State(context.Context) (closure.State, error) {
+func (f *fakeLiveReader) State(ctx context.Context) (closure.State, error) {
+	if f.stateBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return f.state, f.stateErr
 }
 
-func (f *fakeLiveReader) ResolveKind(_ context.Context, token string) (string, error) {
+func (f *fakeLiveReader) ResolveKind(_ context.Context, kind, _ string, _ bool) (string, error) {
 	if f.kindErr != nil {
 		return "", f.kindErr
 	}
 	if f.kind != "" {
 		return f.kind, nil
 	}
-	return token, nil
+	return kind, nil
 }
 
 // withFakeLiveReader swaps the live-reader constructor for one returning fr, so a
@@ -331,6 +368,57 @@ func TestCheckLiveDiscoveryFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "discover server resources") {
 		t.Errorf("error should surface the discovery failure distinctly; got %v", err)
+	}
+}
+
+// TestCheckLiveTimeoutFailsClosed (S1): a live read that outlives --timeout must DENY the
+// whole check fail-closed (exit 1, not errBlocked), never proceeding on a partial snapshot.
+// The fake reader's State blocks on the request context, so a tiny --timeout fires the
+// deadline; runCheckLive returns the cluster-read fail-closed error and writes no report.
+func TestCheckLiveTimeoutFailsClosed(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{kind: "Deployment", stateBlocks: true})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--timeout", "1ms", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("timed-out read = nil error, want a fail-closed error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Errorf("a timed-out read must be exit 1 (operational), not errBlocked/exit 2; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "fail-closed") {
+		t.Errorf("error must name the fail-closed deny; got %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("no report should be written on a fail-closed timeout; got stdout:\n%s", out.String())
+	}
+}
+
+// TestCheckLiveTimeoutZeroDisablesDeadline (S1): --timeout 0 means "no deadline"
+// (signal-cancel only); it must NOT instantly deadline, so a normal read completes and
+// renders its verdict as usual.
+func TestCheckLiveTimeoutZeroDisablesDeadline(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{state: liveStateScenario01(), kind: "Deployment"})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--mode", "enforce", "--timeout", "0", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if !errors.Is(err, errBlocked) {
+		t.Fatalf("--timeout 0 should disable the deadline and run normally; err = %v, want errBlocked", err)
+	}
+	if !strings.Contains(out.String(), "BLOCK") {
+		t.Errorf("--timeout 0 normal run should render the verdict; got:\n%s", out.String())
+	}
+}
+
+// TestCheckTimeoutRejectsBadDuration (S1): a malformed --timeout is a usage error (exit 1),
+// not a silent default — the operator's invocation must be rejected, not misread.
+func TestCheckTimeoutRejectsBadDuration(t *testing.T) {
+	withFakeLiveReader(t, &fakeLiveReader{state: liveStateScenario01(), kind: "Deployment"})
+	var out, errOut bytes.Buffer
+	err := run([]string{"check", "--context", "kind-krsm", "--timeout", "nope", "delete", "Deployment/web", "-n", "prod"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("malformed --timeout = nil error, want a usage error")
+	}
+	if errors.Is(err, errBlocked) {
+		t.Errorf("a malformed --timeout is a usage error (exit 1), not errBlocked/exit 2; got %v", err)
 	}
 }
 
@@ -670,5 +758,41 @@ func TestCheckReportShape(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("report missing %q; got:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestServeCommandFlagValidation (design test 22): `krsm serve` fails fast — BEFORE
+// any cluster contact — on missing TLS material or an invalid mode. A webhook that
+// cannot present a certificate or does not know its verdict mode must not start.
+func TestServeCommandFlagValidation(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if err := run([]string{"serve"}, &out, &errOut); err == nil {
+		t.Error("serve without --tls-cert/--tls-key must be a usage error")
+	}
+	if err := run([]string{"serve", "--tls-cert", "c.pem"}, &out, &errOut); err == nil {
+		t.Error("serve without --tls-key must be a usage error")
+	}
+	err := run([]string{"serve", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--mode", "bogus"}, &out, &errOut)
+	if err == nil {
+		t.Fatal("serve with an invalid --mode must be a usage error")
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Errorf("error %q should name the invalid mode flag", err.Error())
+	}
+
+	// --request-timeout must be in (0, 30s) — the API server's timeoutSeconds ceiling
+	// (finding 7). Both a non-positive and an over-ceiling value fail fast.
+	for _, bad := range []string{"0s", "45s", "30s"} {
+		err := run([]string{"serve", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--request-timeout", bad}, &out, &errOut)
+		if err == nil || !strings.Contains(err.Error(), "request-timeout") {
+			t.Errorf("--request-timeout %s must be a usage error naming the flag, got %v", bad, err)
+		}
+	}
+
+	// No gating signal (annotation off, no serviceaccount, no --gate-all) is a usage
+	// error — never a silent gate-all (finding 3).
+	err = run([]string{"serve", "--tls-cert", "c.pem", "--tls-key", "k.pem", "--agent-annotation", ""}, &out, &errOut)
+	if err == nil || !strings.Contains(err.Error(), "gating signal") {
+		t.Errorf("an all-empty gating config must be a usage error, got %v", err)
 	}
 }

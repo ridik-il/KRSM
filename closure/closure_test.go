@@ -5,6 +5,21 @@ import (
 	"time"
 )
 
+// TestJoinRefs pins the shared ref-rendering used by the CLI output and the webhook
+// reason strings: ", "-joined Ref.String()s, and empty for no refs.
+func TestJoinRefs(t *testing.T) {
+	if got := JoinRefs(nil); got != "" {
+		t.Errorf("JoinRefs(nil) = %q, want empty", got)
+	}
+	refs := []Ref{
+		{GVK: GVK{Version: "v1", Kind: "Service"}, Namespace: "prod", Name: "svc"},
+		{GVK: GVK{Version: "v1", Kind: "Secret"}, Namespace: "prod", Name: "db"},
+	}
+	if got, want := JoinRefs(refs), "Service/prod/svc, Secret/prod/db"; got != want {
+		t.Errorf("JoinRefs = %q, want %q", got, want)
+	}
+}
+
 // TestClosureTerminatesOnCyclicOwners asserts the BFS terminates and stays
 // bounded when ownerReferences form a cycle (adversarial input, DESIGN §8).
 // It builds state inline from exported constructors, so it is a pure closure

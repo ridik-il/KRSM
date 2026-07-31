@@ -8,26 +8,27 @@ import (
 
 // crossRefsFromUnstructured mirrors internal/scenario.crossRefsFrom: cross-refs come
 // from the bare-Pod spec AND the workload pod template (spec.template.spec), plus an
-// HPA's spec.scaleTargetRef. Each referent's uid is resolved through the name→uid
-// index over the listed objects (empty on a miss; crossRefMatches then falls back to
-// Kind/ns/name). ns is the consumer's resolved namespace — every referent is assumed
-// same-namespace, as the loader assumes.
-func crossRefsFromUnstructured(o unstructured.Unstructured, ns string, ix nameUIDIndex) []closure.CrossRef {
+// HPA's spec.scaleTargetRef. It is INDEX-FREE — each referent carries Kind/ns/name with
+// an EMPTY uid (the engine's crossRefMatches falls back to Kind/ns/name, closure/state.go
+// §crossRefMatches). The one-shot BuildObjects fills these uids in a post-pass
+// (resolveCrossRefUIDs); the informer index leaves them empty. ns is the consumer's
+// resolved namespace — every referent is assumed same-namespace, as the loader assumes.
+func crossRefsFromUnstructured(o unstructured.Unstructured, ns string) []closure.CrossRef {
 	spec, found := nestedMap(o.Object, "spec")
 	if !found {
 		return nil
 	}
 
-	out := podSpecCrossRefs(spec, ns, ix)
+	out := podSpecCrossRefs(spec, ns)
 
 	if tmpl, ok := nestedMap(spec, "template", "spec"); ok {
-		out = append(out, podSpecCrossRefs(tmpl, ns, ix)...)
+		out = append(out, podSpecCrossRefs(tmpl, ns)...)
 	}
 
 	if str, ok := nestedMap(spec, "scaleTargetRef"); ok {
 		k := nestedString(str, "kind")
 		n := nestedString(str, "name")
-		out = append(out, crossRef(closure.RefScaleTarget, closure.GVK{Kind: k}, ns, n, ix))
+		out = append(out, crossRef(closure.RefScaleTarget, closure.GVK{Kind: k}, ns, n))
 	}
 	return out
 }
@@ -37,7 +38,7 @@ func crossRefsFromUnstructured(o unstructured.Unstructured, ns string, ix nameUI
 // containers+initContainers+ephemeralContainers (envFrom and env[].valueFrom), and
 // imagePullSecrets. initContainers and ephemeralContainers consume config exactly as
 // regular containers do, so all three are walked.
-func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.CrossRef {
+func podSpecCrossRefs(ps map[string]any, ns string) []closure.CrossRef {
 	var out []closure.CrossRef
 
 	vols, _ := nestedSlice(ps, "volumes")
@@ -48,11 +49,11 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 		}
 		switch {
 		case has(vm, "configMap"):
-			out = append(out, crossRef(closure.RefVolume, cmGVK, ns, nestedString(vm, "configMap", "name"), ix))
+			out = append(out, crossRef(closure.RefVolume, cmGVK, ns, nestedString(vm, "configMap", "name")))
 		case has(vm, "secret"):
-			out = append(out, crossRef(closure.RefVolume, secretGVK, ns, nestedString(vm, "secret", "secretName"), ix))
+			out = append(out, crossRef(closure.RefVolume, secretGVK, ns, nestedString(vm, "secret", "secretName")))
 		case has(vm, "persistentVolumeClaim"):
-			out = append(out, crossRef(closure.RefVolume, pvcGVK, ns, nestedString(vm, "persistentVolumeClaim", "claimName"), ix))
+			out = append(out, crossRef(closure.RefVolume, pvcGVK, ns, nestedString(vm, "persistentVolumeClaim", "claimName")))
 		case has(vm, "projected"):
 			srcs, _ := nestedSlice(vm, "projected", "sources")
 			for _, s := range srcs {
@@ -61,10 +62,10 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 					continue
 				}
 				if has(sm, "configMap") {
-					out = append(out, crossRef(closure.RefVolume, cmGVK, ns, nestedString(sm, "configMap", "name"), ix))
+					out = append(out, crossRef(closure.RefVolume, cmGVK, ns, nestedString(sm, "configMap", "name")))
 				}
 				if has(sm, "secret") {
-					out = append(out, crossRef(closure.RefVolume, secretGVK, ns, nestedString(sm, "secret", "name"), ix))
+					out = append(out, crossRef(closure.RefVolume, secretGVK, ns, nestedString(sm, "secret", "name")))
 				}
 			}
 		}
@@ -77,7 +78,7 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 			if !ok {
 				continue
 			}
-			out = append(out, containerCrossRefs(cm, ns, ix)...)
+			out = append(out, containerCrossRefs(cm, ns)...)
 		}
 	}
 
@@ -87,13 +88,13 @@ func podSpecCrossRefs(ps map[string]any, ns string, ix nameUIDIndex) []closure.C
 		if !ok {
 			continue
 		}
-		out = append(out, crossRef(closure.RefImagePullSecret, secretGVK, ns, nestedString(pm, "name"), ix))
+		out = append(out, crossRef(closure.RefImagePullSecret, secretGVK, ns, nestedString(pm, "name")))
 	}
 
 	return out
 }
 
-func containerCrossRefs(c map[string]any, ns string, ix nameUIDIndex) []closure.CrossRef {
+func containerCrossRefs(c map[string]any, ns string) []closure.CrossRef {
 	var out []closure.CrossRef
 
 	envFrom, _ := nestedSlice(c, "envFrom")
@@ -103,10 +104,10 @@ func containerCrossRefs(c map[string]any, ns string, ix nameUIDIndex) []closure.
 			continue
 		}
 		if has(em, "configMapRef") {
-			out = append(out, crossRef(closure.RefEnvFrom, cmGVK, ns, nestedString(em, "configMapRef", "name"), ix))
+			out = append(out, crossRef(closure.RefEnvFrom, cmGVK, ns, nestedString(em, "configMapRef", "name")))
 		}
 		if has(em, "secretRef") {
-			out = append(out, crossRef(closure.RefEnvFrom, secretGVK, ns, nestedString(em, "secretRef", "name"), ix))
+			out = append(out, crossRef(closure.RefEnvFrom, secretGVK, ns, nestedString(em, "secretRef", "name")))
 		}
 	}
 
@@ -121,10 +122,10 @@ func containerCrossRefs(c map[string]any, ns string, ix nameUIDIndex) []closure.
 			continue
 		}
 		if has(vf, "configMapKeyRef") {
-			out = append(out, crossRef(closure.RefEnv, cmGVK, ns, nestedString(vf, "configMapKeyRef", "name"), ix))
+			out = append(out, crossRef(closure.RefEnv, cmGVK, ns, nestedString(vf, "configMapKeyRef", "name")))
 		}
 		if has(vf, "secretKeyRef") {
-			out = append(out, crossRef(closure.RefEnv, secretGVK, ns, nestedString(vf, "secretKeyRef", "name"), ix))
+			out = append(out, crossRef(closure.RefEnv, secretGVK, ns, nestedString(vf, "secretKeyRef", "name")))
 		}
 	}
 	return out
@@ -136,15 +137,17 @@ var (
 	pvcGVK    = closure.GVK{Version: "v1", Kind: "PersistentVolumeClaim"}
 )
 
-// crossRef builds a CrossRef, resolving the referent's real uid through the index.
-func crossRef(kind closure.RefKind, gvk closure.GVK, ns, name string, ix nameUIDIndex) closure.CrossRef {
+// crossRef builds a CrossRef with an EMPTY referent uid (index-free). The referent is
+// identified by Kind/namespace/name; the one-shot BuildObjects fills the uid later via
+// resolveCrossRefUIDs, while the informer index relies on the Kind/ns/name fallback in
+// closure.crossRefMatches.
+func crossRef(kind closure.RefKind, gvk closure.GVK, ns, name string) closure.CrossRef {
 	return closure.CrossRef{
 		Kind: kind,
 		Ref: closure.Ref{
 			GVK:       gvk,
 			Namespace: ns,
 			Name:      name,
-			UID:       ix.uidFor(gvk.Kind, ns, name),
 		},
 	}
 }
