@@ -262,3 +262,78 @@ spec:
 		}
 	}
 }
+
+// Test-list entry 21b (slice 6 step 4): an ownership root that names no namespace lives
+// in the CONTRACT's own namespace when the contract has one. A TaskContract CR read from
+// the cluster always does, and "the root beside me" is what an author who omitted the
+// field meant.
+//
+// The offline rule (NamespaceFor: a namespaced kind with no namespace is in "default")
+// still applies when the contract itself is namespace-less — a corpus file has no
+// namespace to inherit — so the two wire sources keep defaulting consistently with the
+// objects each of them describes.
+func TestParseOwnershipRootNamespaceDefaultsToContractNamespace(t *testing.T) {
+	withNamespace := []byte(`
+apiVersion: krsm.io/v1alpha1
+kind: TaskContract
+metadata:
+  name: restart-frontend-tree
+  namespace: prod
+spec:
+  allow:
+    - dim: ownership
+      root: {group: apps, version: v1, kind: Deployment, name: frontend}
+`)
+	tc, err := contract.Parse(withNamespace)
+	if err != nil {
+		t.Fatalf("Parse: unexpected error: %v", err)
+	}
+	root := tc.Spec.Allow[0].Root
+	if root.Namespace != "prod" {
+		t.Errorf("root namespace = %q, want %q — an omitted root namespace must inherit the contract's, not fall to \"default\" and miss", root.Namespace, "prod")
+	}
+	if want := contract.SyntheticUID("Deployment", "prod", "frontend"); root.UID != want {
+		t.Errorf("root UID = %q, want %q — the offline identity must be keyed on the SAME namespace", root.UID, want)
+	}
+
+	// A contract with no namespace of its own (the offline corpus shape) has nothing to
+	// inherit, so the loader's "default" rule still applies.
+	withoutNamespace := []byte(`
+apiVersion: krsm.io/v1alpha1
+kind: TaskContract
+metadata:
+  name: restart-frontend-tree
+spec:
+  allow:
+    - dim: ownership
+      root: {group: apps, version: v1, kind: Deployment, name: frontend}
+`)
+	tc, err = contract.Parse(withoutNamespace)
+	if err != nil {
+		t.Fatalf("Parse: unexpected error: %v", err)
+	}
+	if got := tc.Spec.Allow[0].Root.Namespace; got != "default" {
+		t.Errorf("root namespace = %q, want %q — a namespace-less contract has nothing to inherit", got, "default")
+	}
+
+	// A CLUSTER-SCOPED root has no namespace to inherit either: it resolves to "" so it
+	// is never counted as the contents of a namespace.
+	clusterScoped := []byte(`
+apiVersion: krsm.io/v1alpha1
+kind: TaskContract
+metadata:
+  name: drain
+  namespace: prod
+spec:
+  allow:
+    - dim: ownership
+      root: {version: v1, kind: Node, name: node-1}
+`)
+	tc, err = contract.Parse(clusterScoped)
+	if err != nil {
+		t.Fatalf("Parse: unexpected error: %v", err)
+	}
+	if got := tc.Spec.Allow[0].Root.Namespace; got != "" {
+		t.Errorf("cluster-scoped root namespace = %q, want empty — it must not inherit the contract's namespace", got)
+	}
+}

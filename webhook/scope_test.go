@@ -2,23 +2,33 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ridik-il/krsm/closure"
 	"github.com/ridik-il/krsm/scope"
 )
 
-// reRootState is the L1 fixture: Deployment web owns BOTH the ReplicaSet subtree
-// (web-1 → pod web-1-a) and the Service svc, and svc selects the pod. Deleting the
-// ReplicaSet closes over {rs, pod, svc}; the derived scope rooted at the ReplicaSet
-// covers only {rs, pod}, so svc escapes — a verdict the request target alone cannot
-// express. Re-rooting at the Deployment covers the whole closure.
-func reRootState() closure.State {
+// reRootState is the L1 fixture as a State; reRootObjects is the same set as objects,
+// which the clusterInfo fake needs so an annotation-named root can be resolved
+// group-aware (an unresolvable root now fails closed, so a server under an L1 test must
+// know the objects its State knows).
+func reRootState() closure.State { return closure.NewScanState(reRootObjects()) }
+
+// reRootObjects: Deployment web owns BOTH the ReplicaSet subtree (web-1 → pod web-1-a)
+// and the Service svc, and svc selects the pod. Deleting the ReplicaSet closes over
+// {rs, pod, svc}; the derived scope rooted at the ReplicaSet covers only {rs, pod}, so
+// svc escapes — a verdict the request target alone cannot express. Re-rooting at the
+// Deployment covers the whole closure.
+func reRootObjects() []closure.Object {
 	dep := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web", UID: "uid-d"}}
 	rs := closure.Object{
 		Ref:    closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "ReplicaSet"}, Namespace: "prod", Name: "web-1", UID: "uid-rs"},
@@ -34,7 +44,7 @@ func reRootState() closure.State {
 		Owners:   []closure.OwnerRef{{Kind: "Deployment", Name: "web", UID: "uid-d"}},
 		Selector: closure.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
 	}
-	return closure.NewScanState([]closure.Object{dep, rs, pod, svc})
+	return []closure.Object{dep, rs, pod, svc}
 }
 
 // rsDeleteReview builds the DELETE of ReplicaSet prod/web-1 whose oldObject carries
@@ -92,7 +102,7 @@ func TestResolveScopeNoAnnotationIsDerived(t *testing.T) {
 // ReplicaSet delete is in scope — a verdict the request target alone could not
 // express — and the reported provenance is `annotation`, not the derived one.
 func TestResolveScopeTargetAnnotationReRoots(t *testing.T) {
-	s := newTestServer(t, reRootState(), scope.ModeAudit)
+	s := newTestServer(t, reRootState(), scope.ModeAudit, withObjects(reRootObjects()))
 
 	out := s.Handle(context.Background(), rsDeleteReview("l1", annotations(targetAnnotation, "Deployment/prod/web")))
 	if out.Response == nil || !out.Response.Allowed {
@@ -117,7 +127,9 @@ func TestResolveScopeTargetAnnotationReRoots(t *testing.T) {
 // widgetState mirrors reRootState with the ownership root replaced by a CRD kind whose
 // bare Kind ("Widget") is tracked in two groups — the ambiguity the token grammar has
 // to resolve or refuse.
-func widgetState() closure.State {
+func widgetState() closure.State { return closure.NewScanState(widgetObjects()) }
+
+func widgetObjects() []closure.Object {
 	wa := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Group: "a.example.com", Version: "v1", Kind: "Widget"}, Namespace: "prod", Name: "wa", UID: "uid-wa"}}
 	rs := closure.Object{
 		Ref:    closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "ReplicaSet"}, Namespace: "prod", Name: "web-1", UID: "uid-rs"},
@@ -133,14 +145,14 @@ func widgetState() closure.State {
 		Owners:   []closure.OwnerRef{{Kind: "Widget", Name: "wa", UID: "uid-wa"}},
 		Selector: closure.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
 	}
-	return closure.NewScanState([]closure.Object{wa, rs, pod, svc})
+	return []closure.Object{wa, rs, pod, svc}
 }
 
 // TestResolveScopeGroupQualifiedKindReRoots (test 11): a group-qualified kind token
 // "<Kind>.<group>/<ns>/<name>" resolves to that group's tracked GVK and re-roots the
 // derivation there.
 func TestResolveScopeGroupQualifiedKindReRoots(t *testing.T) {
-	s := newTestServer(t, widgetState(), scope.ModeEnforce)
+	s := newTestServer(t, widgetState(), scope.ModeEnforce, withObjects(widgetObjects()))
 	out := s.Handle(context.Background(), rsDeleteReview("q", annotations(targetAnnotation, "Widget.a.example.com/prod/wa")))
 	if out.Response == nil || !out.Response.Allowed {
 		t.Fatalf("group-qualified re-root must resolve and cover the closure, got %#v", out.Response)
@@ -168,7 +180,7 @@ func TestResolveScopeAmbiguousKindFailsClosed(t *testing.T) {
 		}
 	}
 
-	out := newTestServer(t, widgetState(), scope.ModeEnforce).
+	out := newTestServer(t, widgetState(), scope.ModeEnforce, withObjects(widgetObjects())).
 		Handle(context.Background(), rsDeleteReview("amb-ok", annotations(targetAnnotation, "Widget.a.example.com/prod/wa")))
 	if !out.Response.Allowed {
 		t.Errorf("the qualified form of the same Kind must resolve, got deny %q", out.Response.Result.Message)
@@ -248,31 +260,66 @@ func TestResolveScopeReRootIsPinnedByUID(t *testing.T) {
 	}
 }
 
-// TestResolveScopeUnresolvableRootAuthorizesOnlyItself (test 15d): a krsm.io/target
-// naming a WELL-FORMED, tracked kind whose object is absent leaves the re-root Ref
-// uid-less — a uid is never invented for a root that was not found. The subtree walk
-// then starts from a nonexistent root and authorises only that root, so every closure
-// member escapes and the verdict is a fail-closed Block. The failure direction matters:
-// an unresolvable root must never widen the scope (falling back to the derived tree
-// would silently authorise part of the closure the annotation never named).
-func TestResolveScopeUnresolvableRootAuthorizesOnlyItself(t *testing.T) {
-	objs := collidingWidgetState()
-	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs))
+// absentRootCollisionState is the fixture that DISPROVES the "an absent root is
+// harmless because it authorises only itself" claim: the a-group Widget the annotation
+// names does NOT exist, while a b-group Widget with the SAME Kind/namespace/name does —
+// and it owns the whole subtree the action touches. Both share one group-blind
+// byHuman["Widget/prod/w"] bucket, so a uid-less re-root Ref resolves through it and
+// closure's ownedSubtree normalises the walk's start to the b-group Widget: the ABSENT
+// root would authorise another group's entire subtree. An empty index cannot show this
+// — there the absent root really does authorise only itself — which is why the fixture
+// has to carry the collision.
+func absentRootCollisionState() []closure.Object {
+	wb := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Group: "b.example.com", Version: "v1", Kind: "Widget"}, Namespace: "prod", Name: "w", UID: "uid-wb"}}
+	rs := closure.Object{
+		Ref:    closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "ReplicaSet"}, Namespace: "prod", Name: "web-1", UID: "uid-rs"},
+		Owners: []closure.OwnerRef{{Kind: "Widget", Name: "w", UID: "uid-wb"}},
+	}
+	pod := closure.Object{
+		Ref:    closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Pod"}, Namespace: "prod", Name: "web-1-a", UID: "uid-p"},
+		Owners: []closure.OwnerRef{{Kind: "ReplicaSet", Name: "web-1", UID: "uid-rs"}},
+		Labels: map[string]string{"app": "web"},
+	}
+	svc := closure.Object{
+		Ref:      closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "Service"}, Namespace: "prod", Name: "svc", UID: "uid-s"},
+		Owners:   []closure.OwnerRef{{Kind: "Widget", Name: "w", UID: "uid-wb"}},
+		Selector: closure.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+	}
+	return []closure.Object{wb, rs, pod, svc}
+}
 
-	out := s.Handle(context.Background(), rsDeleteReview("ghost", annotations(targetAnnotation, "Widget.a.example.com/prod/ghost")))
-	if out.Response.Allowed {
-		t.Fatal("a re-root at an absent object must fail closed, got allow")
-	}
-	msg := out.Response.Result.Message
-	if strings.Contains(msg, string(reasonScopeUnresolved)) {
-		t.Errorf("an absent object of a TRACKED kind is a computed empty subtree, not an unresolved reference; got %q", msg)
-	}
-	// Every closure member escapes: the authorised set is the root alone, never a
-	// wider tree borrowed from some other object.
-	for _, want := range []string{"ReplicaSet/prod/web-1", "Pod/prod/web-1-a", "Service/prod/svc"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("deny %q must report %s as escaping — an unresolved root authorises only itself", msg, want)
+// TestResolveScopeUnresolvableRootFailsClosed (test 15d, corrected): a krsm.io/target
+// naming a well-formed, TRACKED kind whose object cannot be resolved group-aware is
+// refused with scope-unresolved in BOTH modes — the annotation names a root KRSM cannot
+// resolve, which is exactly what that taxonomy code means.
+//
+// The Ref must NOT be left uid-less and must NOT carry a synthesized uid: either way
+// the engine's lookup falls through to the group-blind Kind/ns/name bucket and the walk
+// starts from whatever object that bucket holds. With this fixture that is the b-group
+// Widget, whose subtree covers the entire closure — so the ABSENT a-group root would
+// return allowed=true, a mis-scope in the UNSAFE direction. Only refusing to resolve
+// delivers the intended fail-closed deny.
+func TestResolveScopeUnresolvableRootFailsClosed(t *testing.T) {
+	objs := absentRootCollisionState()
+	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
+		s := newTestServer(t, closure.NewScanState(objs), mode, withObjects(objs))
+		out := s.Handle(context.Background(), rsDeleteReview("ghost-"+string(mode), annotations(targetAnnotation, "Widget.a.example.com/prod/w")))
+		if out.Response.Allowed {
+			t.Errorf("mode %s: a re-root at an object absent from its OWN group must fail closed, got allow (the other group's subtree authorised it)", mode)
+			continue
 		}
+		if msg := out.Response.Result.Message; !strings.Contains(msg, string(reasonScopeUnresolved)) {
+			t.Errorf("mode %s: deny %q must carry the scope-unresolved code", mode, msg)
+		}
+	}
+
+	// The control: the same name in the group that DOES exist still resolves and
+	// covers the closure, so the deny above is about resolution, not about the fixture
+	// being unauthorisable.
+	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs))
+	out := s.Handle(context.Background(), rsDeleteReview("present", annotations(targetAnnotation, "Widget.b.example.com/prod/w")))
+	if !out.Response.Allowed {
+		t.Errorf("the root that DOES exist must resolve and cover its subtree, got deny %q", out.Response.Result.Message)
 	}
 }
 
@@ -307,11 +354,16 @@ func TestResolveScopeMalformedTargetFailsClosedInvalid(t *testing.T) {
 	}
 
 	// The mirror image: a cluster-scoped kind with the empty namespace segment is
-	// well-formed and resolves (it just does not cover this closure).
-	out := newTestServer(t, reRootState(), scope.ModeEnforce).
+	// well-formed and RESOLVES (it just does not cover this closure). The PV is added
+	// to the tracked set so this really exercises the well-formed path — without it the
+	// ref would fail closed as unresolved and the assertion would pass vacuously.
+	pv := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "PersistentVolume"}, Name: "pv-1", UID: "uid-pv"}}
+	objs := append(reRootObjects(), pv)
+	out := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs)).
 		Handle(context.Background(), rsDeleteReview("pv", annotations(targetAnnotation, "PersistentVolume//pv-1")))
-	if msg := out.Response.Result.Message; strings.Contains(msg, string(reasonInvalid)) {
-		t.Errorf("a cluster-scoped ref with an empty namespace is well-formed, got %q", msg)
+	msg := out.Response.Result.Message
+	if strings.Contains(msg, string(reasonInvalid)) || strings.Contains(msg, string(reasonScopeUnresolved)) {
+		t.Errorf("a cluster-scoped ref with an empty namespace is well-formed and resolvable, got %q", msg)
 	}
 }
 
@@ -340,7 +392,7 @@ func TestResolveScopeTargetAnnotationIsNotSelfAuthorizing(t *testing.T) {
 	}
 	reRoot := annotations(targetAnnotation, "Deployment/prod/web")
 
-	s := newTestServer(t, reRootState(), scope.ModeAudit)
+	s := newTestServer(t, reRootState(), scope.ModeAudit, withObjects(reRootObjects()))
 	out := s.Handle(context.Background(), podRelabel("self", "", reRoot))
 	warn := strings.Join(out.Response.Warnings, "\n")
 	if !strings.Contains(warn, string(scope.ProvenanceDerivedOwner)) {
@@ -361,7 +413,7 @@ func TestResolveScopeTargetAnnotationIsNotSelfAuthorizing(t *testing.T) {
 // message. Responses that never reached scope resolution carry none — an audit record
 // must not claim a provenance that was never computed.
 func TestHandleReportsScopeProvenanceInAuditAnnotations(t *testing.T) {
-	s := newTestServer(t, reRootState(), scope.ModeAudit)
+	s := newTestServer(t, reRootState(), scope.ModeAudit, withObjects(reRootObjects()))
 
 	for name, tc := range map[string]struct {
 		review admissionv1.AdmissionReview
@@ -377,8 +429,18 @@ func TestHandleReportsScopeProvenanceInAuditAnnotations(t *testing.T) {
 		}
 	}
 
+	// The L3 half (step 4): a contract-resolved decision reports provenance `contract`,
+	// so all three levels are distinguishable in an audit query.
+	objs := reRootObjects()
+	cr := taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`)
+	l3 := newTestServer(t, closure.NewScanState(objs), scope.ModeAudit, withObjects(objs), withContracts(contractsWith(cr)))
+	out := l3.Handle(context.Background(), rsDeleteReview("prov-l3", annotations(scopeAnnotation, "prod/task-1")))
+	if got := out.Response.AuditAnnotations[provenanceAuditKey]; got != string(scope.ProvenanceContract) {
+		t.Errorf("contract allow: AuditAnnotations[%s] = %q, want %q", provenanceAuditKey, got, scope.ProvenanceContract)
+	}
+
 	// A deny raised before the scope was resolved reports no provenance.
-	out := s.Handle(context.Background(), admissionv1.AdmissionReview{Request: &admissionv1.AdmissionRequest{}})
+	out = s.Handle(context.Background(), admissionv1.AdmissionReview{Request: &admissionv1.AdmissionRequest{}})
 	if _, ok := out.Response.AuditAnnotations[provenanceAuditKey]; ok {
 		t.Errorf("a pre-resolution deny must not claim a provenance, got %v", out.Response.AuditAnnotations)
 	}
@@ -654,5 +716,467 @@ func TestAllowlistAppliesToDerivedProvenanceOnly(t *testing.T) {
 		Handle(context.Background(), secretDeleteReview("l1-allow", annotations(targetAnnotation, "Deployment.apps/prod/web")))
 	if !out.Response.Allowed {
 		t.Errorf("an L1 (annotation) decision must still be filtered by the allowlist, got deny %q", out.Response.Result.Message)
+	}
+}
+
+// --- Step 4: L3 contract resolution (tests 21b, 22–28) ---
+
+// fakeContracts is the contractGetter seam: a hermetic stand-in for the live GET against
+// a TaskContract CR. It honours ctx first, exactly as a real client does, so an expired
+// admission deadline is observable without a cluster; err (when set) stands for the whole
+// class of GET failures — RBAC forbidden, API-server unreachable, an absent CRD.
+type fakeContracts struct {
+	objs map[string]*unstructured.Unstructured
+	err  error
+}
+
+func (f fakeContracts) Get(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	u, ok := f.objs[namespace+"/"+name]
+	if !ok {
+		return nil, ErrContractNotFound
+	}
+	return u, nil
+}
+
+// withContracts installs the L3 contract seam.
+func withContracts(c contractGetter) func(*Config) {
+	return func(cfg *Config) { cfg.Contracts = c }
+}
+
+// taskContractCR builds a TaskContract CR as the API server would hand it back —
+// unstructured, so the test exercises the same unstructured→JSON→contract.Parse path
+// production uses rather than a Go struct short-cut.
+func taskContractCR(t *testing.T, namespace, name string, allow ...string) *unstructured.Unstructured {
+	t.Helper()
+	body := `{"apiVersion":"krsm.io/v1alpha1","kind":"TaskContract","metadata":{"name":"` + name +
+		`","namespace":"` + namespace + `"},"spec":{"allow":[` + strings.Join(allow, ",") + `]}}`
+	u := &unstructured.Unstructured{}
+	if err := u.UnmarshalJSON([]byte(body)); err != nil {
+		t.Fatalf("taskContractCR: %v", err)
+	}
+	return u
+}
+
+// contractsWith is the common one-contract getter.
+func contractsWith(u *unstructured.Unstructured) fakeContracts {
+	return fakeContracts{objs: map[string]*unstructured.Unstructured{
+		u.GetNamespace() + "/" + u.GetName(): u,
+	}}
+}
+
+// TestResolveScopeContractAllowsCollateral (test 22): krsm.io/scope on oldObject names a
+// TaskContract that is resolved by live GET, parsed and compiled; its clauses ARE the
+// request's scope. A contract authorising the collateral therefore ALLOWS an action the
+// derived scope blocks in enforce, and the response reports provenance `contract` — so an
+// operator can tell a declared authorisation from a synthesized one.
+func TestResolveScopeContractAllowsCollateral(t *testing.T) {
+	objs := reRootObjects()
+	st := closure.NewScanState(objs)
+
+	// Control: with no contract the same delete is a hard Block — the Service escapes
+	// the ReplicaSet-rooted derived scope.
+	out := newTestServer(t, st, scope.ModeEnforce, withObjects(objs)).
+		Handle(context.Background(), rsDeleteReview("l3-ctl", ""))
+	if out.Response.Allowed {
+		t.Fatal("control: derived enforce must block this delete, else test 22 proves nothing")
+	}
+
+	cr := taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`)
+	s := newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withContracts(contractsWith(cr)))
+	out = s.Handle(context.Background(), rsDeleteReview("l3", annotations(scopeAnnotation, "prod/task-1")))
+	if !out.Response.Allowed {
+		t.Fatalf("a contract authorising the collateral must ALLOW, got deny %q", out.Response.Result.Message)
+	}
+	if got := out.Response.AuditAnnotations[provenanceAuditKey]; got != string(scope.ProvenanceContract) {
+		t.Errorf("AuditAnnotations[%s] = %q, want %q", provenanceAuditKey, got, scope.ProvenanceContract)
+	}
+}
+
+// TestResolveScopeContractOwnershipRootDefaultsToContractNamespace (test 21b): an
+// L3 `dim: ownership` root written WITHOUT a namespace belongs to the TaskContract CR's
+// own namespace — which the same-namespace rule has already pinned to the request
+// target's namespace — not to "default".
+//
+// The offline defaulting rule (NamespaceFor: a namespaced kind with no namespace is in
+// "default") is right for a corpus file that has no namespace of its own, and wrong for
+// a namespaced CR: it would build the key Deployment/default/web, miss, and walk an empty
+// subtree — a confusing fail-closed Block for a contract whose author named a root that
+// plainly exists beside it.
+func TestResolveScopeContractOwnershipRootDefaultsToContractNamespace(t *testing.T) {
+	objs := reRootObjects()
+	cr := taskContractCR(t, "prod", "tree",
+		`{"dim":"ownership","root":{"group":"apps","version":"v1","kind":"Deployment","name":"web"}}`)
+
+	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs), withContracts(contractsWith(cr)))
+	out := s.Handle(context.Background(), rsDeleteReview("l3-tree", annotations(scopeAnnotation, "prod/tree")))
+	if !out.Response.Allowed {
+		t.Fatalf("an ownership root with no namespace must resolve in the CONTRACT's namespace and cover its subtree, got deny %q", out.Response.Result.Message)
+	}
+	if got := out.Response.AuditAnnotations[provenanceAuditKey]; got != string(scope.ProvenanceContract) {
+		t.Errorf("AuditAnnotations[%s] = %q, want %q", provenanceAuditKey, got, scope.ProvenanceContract)
+	}
+}
+
+// TestResolveScopeContractOwnershipRootIsResolvedGroupAware (test 21b, miss-rule half):
+// an L3 ownership root is resolved through the group-AWARE GetByGVK and pinned to the
+// resolved object's real uid, and a MISS is scope-unresolved in both modes — the same
+// corrected rule L1's re-root follows, for the same reason.
+//
+// contract.Parse stamps roots with a SyntheticUID, which is an offline convention: no
+// live object carries it, so the engine's lookup falls straight through to the group-blind
+// Kind/ns/name bucket. With this fixture that bucket holds the b-group Widget, whose
+// subtree covers the whole closure — so a contract naming the ABSENT a-group Widget would
+// be ALLOWED by another group's tree. A synthetic uid is therefore not merely useless
+// here, it is actively unsafe, and the root has to be resolved or refused.
+func TestResolveScopeContractOwnershipRootIsResolvedGroupAware(t *testing.T) {
+	objs := absentRootCollisionState() // only Widget.b.example.com/prod/w exists
+	st := closure.NewScanState(objs)
+	root := func(group string) string {
+		return `{"dim":"ownership","root":{"group":"` + group + `","version":"v1","kind":"Widget","name":"w"}}`
+	}
+
+	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
+		cr := taskContractCR(t, "prod", "ghost", root("a.example.com"))
+		out := newTestServer(t, st, mode, withObjects(objs), withContracts(contractsWith(cr))).
+			Handle(context.Background(), rsDeleteReview("l3-ghost-"+string(mode), annotations(scopeAnnotation, "prod/ghost")))
+		if out.Response.Allowed {
+			t.Errorf("mode %s: a contract root absent from its OWN group must fail closed, got allow (the other group's subtree authorised it)", mode)
+			continue
+		}
+		if msg := out.Response.Result.Message; !strings.Contains(msg, string(reasonScopeUnresolved)) {
+			t.Errorf("mode %s: deny %q must carry the scope-unresolved code", mode, msg)
+		}
+	}
+
+	// The control: the root that DOES exist resolves group-aware and covers its subtree,
+	// so the denies above are about resolution, not about ownership roots being unusable.
+	cr := taskContractCR(t, "prod", "real", root("b.example.com"))
+	out := newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withContracts(contractsWith(cr))).
+		Handle(context.Background(), rsDeleteReview("l3-real", annotations(scopeAnnotation, "prod/real")))
+	if !out.Response.Allowed {
+		t.Errorf("the contract root that DOES exist must resolve and cover its subtree, got deny %q", out.Response.Result.Message)
+	}
+}
+
+// TestResolveScopeContractFailuresFailClosed (test 23): EVERY way contract resolution can
+// fail — the seam not wired, the CR absent, the GET erroring, RBAC refusing, the deadline
+// gone, the contract uncompilable, the CR carrying an unknown field — is one
+// scope-unresolved deny, in BOTH modes.
+//
+// The mode-independence is the point. Audit exists to soften a COMPUTED escape so a day-0
+// false positive does not get KRSM uninstalled; an authorisation claim that could not be
+// verified is not a computed escape, and softening it would turn "I could not read your
+// contract" into "you may proceed". Nor may any of these fall back to L0: the derived tree
+// is a different scope from the one the author declared.
+func TestResolveScopeContractFailuresFailClosed(t *testing.T) {
+	objs := reRootObjects()
+	st := closure.NewScanState(objs)
+	present := contractsWith(taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`))
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cases := map[string]struct {
+		contracts contractGetter // nil → the seam is not wired at all
+		ctx       context.Context
+		cr        *unstructured.Unstructured // when set, replaces the served contract
+	}{
+		"nil getter (L3 not wired)": {},
+		"contract not found":        {contracts: fakeContracts{}},
+		"GET error":                 {contracts: fakeContracts{err: errors.New("connection refused")}},
+		"RBAC forbidden": {contracts: fakeContracts{err: apierrors.NewForbidden(
+			schema.GroupResource{Group: "krsm.io", Resource: "taskcontracts"}, "task-1", errors.New("no permission"))}},
+		"expired deadline": {contracts: present, ctx: expired},
+		"uncompilable contract": {cr: taskContractCR(t, "prod", "task-1",
+			`{"dim":"reference","name":"web"}`)},
+		"unknown-field CR": {cr: taskContractCR(t, "prod", "task-1",
+			`{"dim":"resource","gvk":{"version":"v1","kind":"Service"},"namesapce":"prod","name":"svc"}`)},
+		"wrong apiVersion CR": {contracts: contractsWith(func() *unstructured.Unstructured {
+			u := taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`)
+			u.SetAPIVersion("krsm.io/v1")
+			return u
+		}())},
+	}
+
+	for name, tc := range cases {
+		getter := tc.contracts
+		if tc.cr != nil {
+			getter = contractsWith(tc.cr)
+		}
+		ctx := tc.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
+			opts := []func(*Config){withObjects(objs)}
+			if getter != nil {
+				opts = append(opts, withContracts(getter))
+			}
+			out := newTestServer(t, st, mode, opts...).
+				Handle(ctx, rsDeleteReview("fail", annotations(scopeAnnotation, "prod/task-1")))
+			if out.Response.Allowed {
+				t.Errorf("%s / mode %s: an unresolvable contract must fail closed, got allow", name, mode)
+				continue
+			}
+			if msg := out.Response.Result.Message; !strings.Contains(msg, string(reasonScopeUnresolved)) {
+				t.Errorf("%s / mode %s: deny %q must carry the scope-unresolved code", name, mode, msg)
+			}
+		}
+	}
+}
+
+// TestResolveScopeContractCrossNamespaceFailsClosed (test 24): the same-namespace rule is
+// the ONLY bound on a bearer capability in v0.5, so it is enforced before the contract is
+// even read. A reference to a contract in another namespace fails closed EVEN WHEN that
+// contract exists and would authorise the action — otherwise a compromised agent in a
+// permissive namespace's neighbour could simply point at the permissive contract. A
+// cluster-scoped request has no namespace to be bound BY, so it cannot use L3 at all here.
+func TestResolveScopeContractCrossNamespaceFailsClosed(t *testing.T) {
+	objs := reRootObjects()
+	// The contract EXISTS, in staging, and grants everything — so a pass here would be a
+	// real capability leak, not a lookup miss.
+	permissive := contractsWith(taskContractCR(t, "staging", "task-1", `{"dim":"namespace","namespace":"prod"}`))
+
+	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
+		out := newTestServer(t, closure.NewScanState(objs), mode, withObjects(objs), withContracts(permissive)).
+			Handle(context.Background(), rsDeleteReview("xns-"+string(mode), annotations(scopeAnnotation, "staging/task-1")))
+		if out.Response.Allowed {
+			t.Errorf("mode %s: a cross-namespace contract reference must fail closed, got allow", mode)
+			continue
+		}
+		if msg := out.Response.Result.Message; !strings.Contains(msg, string(reasonScopeUnresolved)) {
+			t.Errorf("mode %s: deny %q must carry the scope-unresolved code", mode, msg)
+		}
+	}
+
+	// The cluster-scoped mirror: a PersistentVolume delete has no namespace, so no
+	// same-namespace bound can hold and L3 is refused rather than defaulted to some
+	// namespace nobody named.
+	//
+	// The VERDICT here is subsumed by the same-namespace check above ("" never equals the
+	// referenced namespace), so the assertion that earns the dedicated branch is the
+	// DIAGNOSIS: reporting this as a cross-namespace reference would tell an operator to
+	// go move a contract that no namespace could ever satisfy.
+	pv := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "PersistentVolume"}, Name: "pv-1", UID: "uid-pv"}}
+	pvObjs := []closure.Object{pv}
+	clusterScoped := contractsWith(taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`))
+	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
+		out := newTestServer(t, closure.NewScanState(pvObjs), mode, withObjects(pvObjs), withContracts(clusterScoped)).
+			Handle(context.Background(), pvDeleteReview("cs-l3-"+string(mode), annotations(scopeAnnotation, "prod/task-1")))
+		if out.Response.Allowed {
+			t.Errorf("mode %s: a cluster-scoped request must not be able to use L3, got allow", mode)
+			continue
+		}
+		msg := out.Response.Result.Message
+		if !strings.Contains(msg, string(reasonScopeUnresolved)) {
+			t.Errorf("mode %s: deny %q must carry the scope-unresolved code", mode, msg)
+		}
+		if !strings.Contains(msg, "cluster-scoped") {
+			t.Errorf("mode %s: deny %q must diagnose the CLUSTER-SCOPED request, not report a cross-namespace reference the operator could never fix", mode, msg)
+		}
+	}
+}
+
+// TestResolveScopeMalformedContractRefFailsClosedInvalid (test 25): a krsm.io/scope whose
+// SHAPE is wrong — not exactly two non-empty, whitespace-free segments — is `invalid`, the
+// code distinct from the scope-unresolved one a well-formed-but-unresolvable reference
+// gets. Operators grep a typo apart from a broken or revoked reference.
+func TestResolveScopeMalformedContractRefFailsClosedInvalid(t *testing.T) {
+	objs := reRootObjects()
+	present := contractsWith(taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`))
+
+	for name, value := range map[string]string{
+		"one segment":         "task-1",
+		"three segments":      "prod/task-1/extra",
+		"empty value":         "",
+		"empty namespace":     "/task-1",
+		"empty name":          "prod/",
+		"whitespace in ns":    "pr od/task-1",
+		"whitespace in name":  "prod/task 1",
+		"both empty segments": "/",
+	} {
+		out := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs), withContracts(present)).
+			Handle(context.Background(), rsDeleteReview("badref", annotations(scopeAnnotation, value)))
+		if out.Response.Allowed {
+			t.Errorf("%s (%q): a malformed contract reference must fail closed, got allow", name, value)
+			continue
+		}
+		msg := out.Response.Result.Message
+		if !strings.Contains(msg, string(reasonInvalid)) {
+			t.Errorf("%s (%q): deny %q must carry the invalid code", name, value, msg)
+		}
+	}
+}
+
+// TestL3UnavailabilityDoesNotDisableL0AndL1 (test 26): a broken contract channel fails
+// only the requests that USE it. On one server whose getter errors on every read, an L0
+// request still gets its derived verdict and an L1 request still re-roots — because
+// neither path touches the getter at all.
+//
+// This is the availability half of "fail closed": a gate that denied every request the
+// moment an optional dependency broke would be uninstalled after its first CRD hiccup,
+// and a KRSM that is not installed protects nothing.
+func TestL3UnavailabilityDoesNotDisableL0AndL1(t *testing.T) {
+	objs := reRootObjects()
+	broken := fakeContracts{err: errors.New("apiserver unreachable")}
+	s := newTestServer(t, closure.NewScanState(objs), scope.ModeAudit, withObjects(objs), withContracts(broken))
+
+	// L0: the derived verdict is computed and reported exactly as with a healthy L3.
+	out := s.Handle(context.Background(), rsDeleteReview("avail-l0", ""))
+	warn := strings.Join(out.Response.Warnings, "\n")
+	if !out.Response.Allowed || !strings.Contains(warn, "Service/prod/svc") {
+		t.Errorf("L0 must still decide while L3 is down; got allowed=%v warnings=%q", out.Response.Allowed, out.Response.Warnings)
+	}
+	if !strings.Contains(warn, string(scope.ProvenanceDerivedOwner)) {
+		t.Errorf("L0 warnings %q must still report the derived provenance", warn)
+	}
+
+	// L1: the re-root still resolves and covers the closure.
+	out = s.Handle(context.Background(), rsDeleteReview("avail-l1", annotations(targetAnnotation, "Deployment/prod/web")))
+	if !out.Response.Allowed || len(out.Response.Warnings) != 0 {
+		t.Errorf("L1 must still re-root while L3 is down; got allowed=%v warnings=%q", out.Response.Allowed, out.Response.Warnings)
+	}
+
+	// The control: an L3 request on the SAME server does fail closed, so the two
+	// assertions above are about isolation, not about the getter being ignored.
+	out = s.Handle(context.Background(), rsDeleteReview("avail-l3", annotations(scopeAnnotation, "prod/task-1")))
+	if out.Response.Allowed {
+		t.Error("the L3 request on the same server must fail closed, got allow")
+	}
+}
+
+// TestResolveScopeContractOutranksTargetAnnotation (test 27): with both governing
+// annotations present the contract wins outright — the levels are a strict priority, not
+// a union.
+//
+// The fixture makes the contract the NARROWER of the two on purpose: the target
+// annotation re-roots at the Deployment (covering the whole closure, an Allow) while the
+// contract authorises only the ReplicaSet's own subtree (the Service escapes, a Block).
+// A "most permissive wins" or a merging implementation would Allow here. Only true
+// priority denies — and reports provenance `contract`, so the operator sees which
+// statement of intent was honoured.
+func TestResolveScopeContractOutranksTargetAnnotation(t *testing.T) {
+	objs := reRootObjects()
+	narrow := contractsWith(taskContractCR(t, "prod", "narrow",
+		`{"dim":"ownership","root":{"group":"apps","version":"v1","kind":"ReplicaSet","name":"web-1"}}`))
+	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs), withContracts(narrow))
+
+	// Control: the target annotation ALONE allows this delete.
+	out := s.Handle(context.Background(), rsDeleteReview("prio-ctl", annotations(targetAnnotation, "Deployment/prod/web")))
+	if !out.Response.Allowed {
+		t.Fatalf("control: the target annotation alone must allow, else test 27 proves nothing; got deny %q", out.Response.Result.Message)
+	}
+
+	out = s.Handle(context.Background(), rsDeleteReview("prio", annotations(
+		targetAnnotation, "Deployment/prod/web",
+		scopeAnnotation, "prod/narrow")))
+	if out.Response.Allowed {
+		t.Fatal("the NARROWER contract must win over the target annotation, got allow (the levels were merged or the widest won)")
+	}
+	msg := out.Response.Result.Message
+	if !strings.Contains(msg, string(scope.ProvenanceContract)) {
+		t.Errorf("deny %q must report the contract provenance", msg)
+	}
+	if strings.Contains(msg, string(scope.ProvenanceAnnotation)) {
+		t.Errorf("deny %q must not report the annotation provenance — the contract governed", msg)
+	}
+	if !strings.Contains(msg, "Service/prod/svc") {
+		t.Errorf("deny %q must name the escape the CONTRACT's scope leaves uncovered", msg)
+	}
+}
+
+// TestHandleReportsAllowlistExemptionsInAuditAnnotations (tests 27b + 28): when the
+// cross-boundary allowlist drops escapes, the response records WHICH refs it dropped —
+// machine-readable, beside the provenance. The key appears ONLY when an exemption actually
+// occurred: an always-present (or empty) key would make "the operator's allowlist silently
+// widened this verdict" indistinguishable from "nothing was exempted" in an audit query,
+// and the exemption is the fact worth reviewing.
+//
+// It names the refs because a verdict softened by a flag is the one an auditor must be able
+// to reconstruct: the residual message deliberately reports only what is LEFT to act on, so
+// without this key the exempted collateral appears nowhere at all.
+func TestHandleReportsAllowlistExemptionsInAuditAnnotations(t *testing.T) {
+	objs := secretState(
+		secretConsumer(gatewayGVK, "infra", "gw", "uid-gw"),
+		secretConsumer(gatewayGVK, "staging", "gw2", "uid-gw2"),
+	)
+	st := closure.NewScanState(objs)
+
+	// One of the two indirect escapes is exempted: the key names exactly that one, and
+	// the residual message still names the other.
+	out := newTestServer(t, st, scope.ModeEnforce, withObjects(objs),
+		withAllowlist(Allowlist{Namespaces: map[string]bool{"infra": true}})).
+		Handle(context.Background(), secretDeleteReview("ex-1", ""))
+	got := out.Response.AuditAnnotations[exemptedAuditKey]
+	if !strings.Contains(got, "Gateway/infra/gw") {
+		t.Errorf("AuditAnnotations[%s] = %q, must name the exempted ref", exemptedAuditKey, got)
+	}
+	if strings.Contains(got, "Gateway/staging/gw2") {
+		t.Errorf("AuditAnnotations[%s] = %q, must name only the EXEMPTED refs, not the residual escape", exemptedAuditKey, got)
+	}
+
+	// No allowlist at all: nothing was exempted, so the key is absent — not empty.
+	out = newTestServer(t, st, scope.ModeEnforce, withObjects(objs)).
+		Handle(context.Background(), secretDeleteReview("ex-2", ""))
+	if v, ok := out.Response.AuditAnnotations[exemptedAuditKey]; ok {
+		t.Errorf("with no allowlist the exemption key must be ABSENT, got %q", v)
+	}
+
+	// An allowlist that matches nothing in this closure is equally no exemption.
+	out = newTestServer(t, st, scope.ModeEnforce, withObjects(objs),
+		withAllowlist(Allowlist{Namespaces: map[string]bool{"unrelated": true}})).
+		Handle(context.Background(), secretDeleteReview("ex-3", ""))
+	if v, ok := out.Response.AuditAnnotations[exemptedAuditKey]; ok {
+		t.Errorf("an allowlist that exempted nothing must leave the key ABSENT, got %q", v)
+	}
+
+	// The provenance key is always there regardless — the two are independent facts.
+	if got := out.Response.AuditAnnotations[provenanceAuditKey]; got != string(scope.ProvenanceDerivedOwner) {
+		t.Errorf("AuditAnnotations[%s] = %q, want %q", provenanceAuditKey, got, scope.ProvenanceDerivedOwner)
+	}
+}
+
+// TestAllowlistIgnoredForContractProvenanceEndToEnd (test 21, end-to-end half): the
+// step-3 test could only assert the allowlistApplies gate directly, because L3 could not
+// be driven through Handle before the contractGetter seam existed. It can now, so the
+// property is pinned where it matters: a decision reached under a DECLARED contract is
+// never widened by an operator flag.
+//
+// The allowlist exists because a DERIVED scope cannot know which shared boundaries are
+// legitimate. A contract has no such gap — its author said exactly what is in scope — so
+// letting --allow-namespace soften it would overrule that author from the server command
+// line, silently and invisibly to them.
+func TestAllowlistIgnoredForContractProvenanceEndToEnd(t *testing.T) {
+	objs := secretState(secretConsumer(gatewayGVK, "infra", "gw", "uid-gw"))
+	st := closure.NewScanState(objs)
+	// The contract authorises the Secret alone, so the Gateway escapes it.
+	cr := taskContractCR(t, "prod", "narrow",
+		`{"dim":"resource","gvk":{"version":"v1","kind":"Secret"},"namespace":"prod","name":"tls"}`)
+	wide := Allowlist{Namespaces: map[string]bool{"infra": true}}
+
+	// Control: under the DERIVED scope that very allowlist exempts the escape and admits.
+	out := newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withAllowlist(wide)).
+		Handle(context.Background(), secretDeleteReview("l3-al-ctl", ""))
+	if !out.Response.Allowed {
+		t.Fatalf("control: the allowlist must exempt this escape under a derived scope, else the test proves nothing; got deny %q", out.Response.Result.Message)
+	}
+
+	out = newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withAllowlist(wide), withContracts(contractsWith(cr))).
+		Handle(context.Background(), secretDeleteReview("l3-al", annotations(scopeAnnotation, "prod/narrow")))
+	if out.Response.Allowed {
+		t.Fatal("a contract-provenance decision must ignore the allowlist, got allow (a server flag widened a declared scope)")
+	}
+	msg := out.Response.Result.Message
+	if !strings.Contains(msg, "Gateway/infra/gw") {
+		t.Errorf("deny %q must still name the escape the allowlist would have exempted", msg)
+	}
+	if _, ok := out.Response.AuditAnnotations[exemptedAuditKey]; ok {
+		t.Errorf("no exemption may be recorded for a contract decision, got %v", out.Response.AuditAnnotations)
 	}
 }

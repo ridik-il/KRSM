@@ -45,6 +45,11 @@ const (
 // human status message / warning text.
 const provenanceAuditKey = "krsm.io/scope-provenance"
 
+// exemptedAuditKey is the response AuditAnnotations key naming the refs the
+// cross-boundary allowlist dropped from the escape set. It is set ONLY when an exemption
+// occurred, so an audit query can find every verdict a server flag softened.
+const exemptedAuditKey = "krsm.io/allowlist-exempted"
+
 // reason renders one credential-free reason string: "krsm:<code>: <detail>". It is
 // the ONLY reason format the webhook emits (approved plan lean 4).
 func reason(code reasonCode, detail string) string {
@@ -57,10 +62,15 @@ type Config struct {
 	ScopeInfo clusterInfo
 	Synced    func() bool
 	Mode      scope.Mode
-	Matcher   AgentMatcher                     // nil → MatchAll{} (gate everything — library-conservative)
-	Fresh     Freshness                        // required (New rejects nil); NoFreshness explicitly disables the staleness guard
-	Timeout   time.Duration                    // per-request deadline; 0 → DefaultRequestTimeout (must stay below the webhook config's timeoutSeconds)
-	Allowlist Allowlist                        // cross-boundary escape hatch for derived scopes; zero value exempts nothing
+	Matcher   AgentMatcher  // nil → MatchAll{} (gate everything — library-conservative)
+	Fresh     Freshness     // required (New rejects nil); NoFreshness explicitly disables the staleness guard
+	Timeout   time.Duration // per-request deadline; 0 → DefaultRequestTimeout (must stay below the webhook config's timeoutSeconds)
+	Allowlist Allowlist     // cross-boundary escape hatch for derived scopes; zero value exempts nothing
+	// Contracts resolves the TaskContract a krsm.io/scope annotation names, by live
+	// GET. nil DISABLES L3: a request that declares krsm.io/scope then fails closed
+	// (scope-unresolved) rather than silently falling back to the derived tree, which
+	// would grant a scope the author never asked for. L0/L1 are unaffected.
+	Contracts contractGetter
 	Logf      func(format string, args ...any) // nil → log.Printf
 }
 
@@ -75,6 +85,7 @@ type Server struct {
 	fresh     Freshness
 	timeout   time.Duration
 	allowlist Allowlist
+	contracts contractGetter
 	logf      func(string, ...any)
 }
 
@@ -102,7 +113,7 @@ func New(c Config) (*Server, error) {
 	if timeout <= 0 {
 		timeout = DefaultRequestTimeout
 	}
-	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, allowlist: c.Allowlist, logf: logf}, nil
+	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, allowlist: c.Allowlist, contracts: c.Contracts, logf: logf}, nil
 }
 
 // Handle evaluates one decoded AdmissionReview and returns the response review. It is
@@ -245,8 +256,9 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 	// Cross-boundary allowlist: for DERIVED scopes only, drop the exempt INDIRECT
 	// escapes before the mode is applied, so audit's downgrade describes the RESIDUAL
 	// escape set an operator actually has to act on.
+	var exempted []closure.Ref
 	if allowlistApplies(pred.Provenance) {
-		dec = s.allowlist.filterEscapes(dec, action.Target)
+		dec, exempted = s.allowlist.filterEscapes(dec, action.Target)
 	}
 
 	dec = s.mode.Apply(dec)
@@ -255,6 +267,13 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 	// case whose message says nothing). Denials raised before resolveScope ran carry no
 	// provenance: an audit record must not report a scope that was never resolved.
 	resp.AuditAnnotations = map[string]string{provenanceAuditKey: string(pred.Provenance)}
+	if len(exempted) > 0 {
+		// Only when an exemption actually happened. An always-present key would make
+		// "an operator flag widened this verdict" indistinguishable from "nothing was
+		// exempted" in an audit query — and the exempted refs appear NOWHERE else, since
+		// the message reports only the residual set.
+		resp.AuditAnnotations[exemptedAuditKey] = closure.JoinRefs(exempted)
+	}
 	return respond(review, resp)
 }
 

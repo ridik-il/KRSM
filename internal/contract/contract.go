@@ -103,7 +103,7 @@ func Parse(raw []byte) (scope.TaskContract, error) {
 		}
 		ac.Selector = sel
 		if rc.Root != nil {
-			rootNS := NamespaceFor(rc.Root.Kind, rc.Root.Namespace)
+			rootNS := rootNamespace(rc.Root.Kind, rc.Root.Namespace, rtc.Metadata.Namespace)
 			ac.Root = closure.Ref{
 				GVK:       closure.GVK{Group: rc.Root.Group, Version: rc.Root.Version, Kind: rc.Root.Kind},
 				Namespace: rootNS,
@@ -120,6 +120,25 @@ func Parse(raw []byte) (scope.TaskContract, error) {
 		Metadata:   scope.Metadata{Name: rtc.Metadata.Name, Namespace: rtc.Metadata.Namespace},
 		Spec:       scope.Spec{Allow: allow, MaxSeverity: scope.Severity(rtc.Spec.MaxSeverity)},
 	}, nil
+}
+
+// rootNamespace resolves an ownership root's namespace. A root that names no namespace
+// lives in the CONTRACT's own namespace when the contract has one — a TaskContract CR
+// read from the cluster always does, and "the root beside me" is what an author who
+// omitted the field meant. Only when the contract itself is namespace-less (an offline
+// corpus file, which has no namespace to inherit) does NamespaceFor's "default" apply.
+//
+// The alternative — always defaulting to "default" — is a silent mis-resolution for the
+// live path: a root in a `prod` CR would build the key Kind/default/name, miss, and
+// authorise an empty subtree. That direction is fail-closed rather than dangerous, but it
+// is a confusing deny for a contract whose author named a root that plainly exists, and
+// the same-namespace rule already pins a contract's namespace to the request's.
+// NamespaceFor still wins for a cluster-scoped kind, which has no namespace to inherit.
+func rootNamespace(kind, declared, contractNamespace string) string {
+	if declared == "" {
+		declared = contractNamespace
+	}
+	return NamespaceFor(kind, declared)
 }
 
 // clauseNamespace resolves a clause's namespace field, and applies the loader's
