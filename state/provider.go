@@ -458,6 +458,40 @@ func (p *Provider) Tracked(gvk closure.GVK) bool {
 	return false
 }
 
+// GVKsForKind returns every tracked GVK whose Kind is kind, across all groups. It is
+// the Kind→GVK direction the webhook's krsm.io/target annotation needs (KindFor maps a
+// plural GVR, Tracked answers only yes/no for a known GVK). The full set is returned
+// deliberately: a bare Kind matching two groups is ambiguous and the caller must fail
+// closed rather than pick one (the S2 class). Order is map-iteration order and carries
+// no meaning — callers must not treat the first element as a winner.
+func (p *Provider) GVKsForKind(kind string) []closure.GVK {
+	var out []closure.GVK
+	for k := range p.targets {
+		if k.Kind == kind {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// GetByGVK resolves ONE object by its exact Group+Kind+namespace+name — the
+// group-aware counterpart of Get, which falls back to the group-BLIND Kind/ns/name
+// bucket when a ref carries no uid (design rev 3, "Group-blind human key"). The
+// webhook's scope channel uses it to pin an annotation-named ownership root to a real
+// uid before building the clause: two tracked kinds sharing a Kind in different API
+// groups occupy the same blind bucket, so resolving a root through it could walk a
+// different object's subtree and authorise the wrong blast radius.
+//
+// A miss reports false. The caller must fail closed on it (leave the root uid-less, so
+// the subtree walk starts from a nonexistent root) rather than synthesize an identity.
+func (p *Provider) GetByGVK(gvk closure.GVK, namespace, name string) (closure.Object, bool) {
+	o, ok := p.idx.getByGVK(gvk, namespace, name)
+	if !ok {
+		return closure.Object{}, false
+	}
+	return *o, true
+}
+
 // stalenessReason is the single, credential-free reason a verdict is denied because the
 // cache could not be confirmed current against the request (ADR-0004 fail-closed).
 const stalenessReason = "could not confirm current state"

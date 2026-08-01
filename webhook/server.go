@@ -30,7 +30,20 @@ const (
 	// (transient sync) and escape (computed) — a correct install generates the webhook
 	// rules from the tracked set, so this state is unreachable in production (slice 7).
 	reasonUntracked reasonCode = "untracked"
+	// reasonScopeUnresolved: the request DECLARED a scope (krsm.io/target, and later
+	// krsm.io/scope) that is well-formed but cannot be resolved — an unknown or
+	// ambiguous kind token, a missing/unreadable contract. Distinct from invalid
+	// (malformed syntax) so operators can grep a typo apart from a broken reference.
+	// It fails closed in BOTH modes: audit softens only a COMPUTED escape, never an
+	// unverifiable scope claim, and falling back to L0 would hide the declared intent.
+	reasonScopeUnresolved reasonCode = "scope-unresolved"
 )
+
+// provenanceAuditKey is the response AuditAnnotations key carrying the resolved scope
+// provenance (ADR-0011). The API server copies it into its audit record, so operators
+// can query how a verdict's scope arose — machine-readable, rather than only inside the
+// human status message / warning text.
+const provenanceAuditKey = "krsm.io/scope-provenance"
 
 // reason renders one credential-free reason string: "krsm:<code>: <detail>". It is
 // the ONLY reason format the webhook emits (approved plan lean 4).
@@ -47,20 +60,22 @@ type Config struct {
 	Matcher   AgentMatcher                     // nil → MatchAll{} (gate everything — library-conservative)
 	Fresh     Freshness                        // required (New rejects nil); NoFreshness explicitly disables the staleness guard
 	Timeout   time.Duration                    // per-request deadline; 0 → DefaultRequestTimeout (must stay below the webhook config's timeoutSeconds)
+	Allowlist Allowlist                        // cross-boundary escape hatch for derived scopes; zero value exempts nothing
 	Logf      func(format string, args ...any) // nil → log.Printf
 }
 
 // Server evaluates AdmissionReviews against the indexed live state. Validating only:
 // it never sets a patch and never mutates the request.
 type Server struct {
-	state   closure.State
-	info    clusterInfo
-	synced  func() bool
-	mode    scope.Mode
-	matcher AgentMatcher
-	fresh   Freshness
-	timeout time.Duration
-	logf    func(string, ...any)
+	state     closure.State
+	info      clusterInfo
+	synced    func() bool
+	mode      scope.Mode
+	matcher   AgentMatcher
+	fresh     Freshness
+	timeout   time.Duration
+	allowlist Allowlist
+	logf      func(string, ...any)
 }
 
 // New builds a Server, rejecting an incomplete Config: a webhook without state, a
@@ -87,7 +102,7 @@ func New(c Config) (*Server, error) {
 	if timeout <= 0 {
 		timeout = DefaultRequestTimeout
 	}
-	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, logf: logf}, nil
+	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, allowlist: c.Allowlist, logf: logf}, nil
 }
 
 // Handle evaluates one decoded AdmissionReview and returns the response review. It is
@@ -195,7 +210,13 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 		}
 	}
 
-	pred := scope.Derive(action.Target)
+	// Scope channel (ADR-0011): L1 krsm.io/target re-root over L0 derived, read from
+	// oldObject only. An unresolvable declared scope denies here — never a silent
+	// downgrade to the derived tree.
+	pred, rc, err := s.resolveScope(ctx, req, oldU, action.Target)
+	if err != nil {
+		return respond(review, deny(rc, err.Error()))
+	}
 	dec := closure.Safe(s.state, action, pred.Clauses)
 
 	// Staleness guard: confirm the cache is current for the request, bounded to the
@@ -221,8 +242,20 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 		return respond(review, deny(reasonInternal, "request deadline exceeded"))
 	}
 
+	// Cross-boundary allowlist: for DERIVED scopes only, drop the exempt INDIRECT
+	// escapes before the mode is applied, so audit's downgrade describes the RESIDUAL
+	// escape set an operator actually has to act on.
+	if allowlistApplies(pred.Provenance) {
+		dec = s.allowlist.filterEscapes(dec, action.Target)
+	}
+
 	dec = s.mode.Apply(dec)
-	return respond(review, decisionResponse(dec, pred.Provenance))
+	resp := decisionResponse(dec, pred.Provenance)
+	// Structured provenance on every DECIDED response (Allow included — an Allow is the
+	// case whose message says nothing). Denials raised before resolveScope ran carry no
+	// provenance: an audit record must not report a scope that was never resolved.
+	resp.AuditAnnotations = map[string]string{provenanceAuditKey: string(pred.Provenance)}
+	return respond(review, resp)
 }
 
 // decisionResponse maps the applied Decision to an AdmissionResponse: Block denies

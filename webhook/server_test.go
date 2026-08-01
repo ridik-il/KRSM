@@ -50,6 +50,17 @@ func deleteReview(uid string) admissionv1.AdmissionReview {
 }
 
 // newTestServer builds a Server over the given state with sane test defaults.
+// withObjects gives the server's clusterInfo the same object set the State holds, so
+// an ownership root named by annotation resolves to a real, group-disambiguated uid.
+func withObjects(objs []closure.Object) func(*Config) {
+	return func(c *Config) { c.ScopeInfo = testScope{objs: objs} }
+}
+
+// withAllowlist installs the cross-boundary allowlist under test.
+func withAllowlist(a Allowlist) func(*Config) {
+	return func(c *Config) { c.Allowlist = a }
+}
+
 func newTestServer(t *testing.T, st closure.State, mode scope.Mode, opts ...func(*Config)) *Server {
 	t.Helper()
 	c := Config{
