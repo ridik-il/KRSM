@@ -7,7 +7,7 @@
 #     (both app=web) and excluding db-ccc (app=db) — a precision a resource `*` glob
 #     could not express without over-granting db-ccc.
 # maxSeverity is carried on the predicate (DESIGN §6) but not enforced this slice.
-apiVersion: krsm.io/v1
+apiVersion: krsm.io/v1alpha1
 kind: TaskContract
 metadata:
   name: restart-frontend-web-pods

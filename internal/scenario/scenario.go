@@ -1,10 +1,10 @@
 // Package scenario loads a KRSM golden scenario — cluster.yaml, request.yaml and
 // scope.yaml — into the closure types so it can be checked by closure.Safe.
 //
-// It is a dev/demo concern, not part of the embeddable SDK: it is the only place
-// (outside tests) that depends on sigs.k8s.io/yaml, keeping the public closure
-// package stdlib-only. Both the krsm CLI and the closure golden tests use it, so
-// there is a single loader rather than two copies.
+// It is a dev/demo concern, not part of the embeddable SDK: like internal/contract
+// (which owns the TaskContract wire form), it depends on sigs.k8s.io/yaml so the
+// public closure and scope packages do not have to. Both the krsm CLI and the closure
+// golden tests use it, so there is a single loader rather than two copies.
 package scenario
 
 import (
@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ridik-il/krsm/closure"
+	"github.com/ridik-il/krsm/internal/contract"
 	"github.com/ridik-il/krsm/scope"
 )
 
@@ -88,7 +89,7 @@ func Load(dir string) (*Scenario, error) {
 // loadScope resolves a scenario's authorised scope and its human provenance, in
 // descending order of declaredness (ADR-0011 progressive scope):
 //
-//  1. taskcontract.yaml → parseTaskContract → scope.Compile — the declared-contract path.
+//  1. taskcontract.yaml → contract.Parse → scope.Compile — the declared-contract path.
 //  2. scope.yaml → parseScope — the legacy explicit-clause path (pre-v0.3 scenarios).
 //  3. neither file present → scope.Derive(target) — the Level-0 derived default: a
 //     single ownership clause rooted at the action target, the zero-config verdict.
@@ -100,7 +101,7 @@ func Load(dir string) (*Scenario, error) {
 func loadScope(read func(string) ([]byte, error), target closure.Ref) ([]closure.ScopeClause, string, error) {
 	contractRaw, err := read("taskcontract.yaml")
 	if err == nil {
-		tc, perr := parseTaskContract(contractRaw)
+		tc, perr := contract.Parse(contractRaw)
 		if perr != nil {
 			return nil, "", perr
 		}
@@ -233,48 +234,15 @@ func gvkOf(apiVersion, kind string) closure.GVK {
 	return g
 }
 
-// clusterScopedKinds are the standard Kubernetes kinds that exist outside any
-// namespace. A cluster-scoped object resolves to namespace "" regardless of input,
-// so it is never counted as the contents of a namespace and matches scope clauses
-// on "". Custom cluster-scoped CRDs need live discovery and are deferred to v0.4;
-// YAML cannot distinguish an absent namespace from an explicit empty one.
-//
-// SAFETY INVARIANT: only add a kind here if it is *definitely* cluster-scoped. A
-// namespaced kind listed here would resolve to namespace "" and so escape its
-// namespace's containment — a Namespace delete would silently miss it (a false
-// negative, the one error class a safety gate must not have). Over-inclusion of a
-// genuinely cluster-scoped kind is merely conservative; under-scoping is unsafe.
-// This static map stands in for API-discovery/RESTMapper scope until v0.4 reads it
-// live. Guarded by TestClusterScopedKindsExcludesNamespaced.
-var clusterScopedKinds = map[string]bool{
-	"Namespace":                      true,
-	"Node":                           true,
-	"PersistentVolume":               true,
-	"ClusterRole":                    true,
-	"ClusterRoleBinding":             true,
-	"StorageClass":                   true,
-	"PriorityClass":                  true,
-	"CustomResourceDefinition":       true,
-	"IngressClass":                   true,
-	"APIService":                     true,
-	"ValidatingWebhookConfiguration": true,
-	"MutatingWebhookConfiguration":   true,
-	"RuntimeClass":                   true,
-}
+// nsOf and uidOf are the loader's namespace-defaulting and synthetic-identity rules.
+// They live in internal/contract because the shared TaskContract parser needs exactly
+// the same rules — a contract clause and the object it authorises must resolve their
+// namespaces identically, or a clause would gate on a namespace no object ever has.
+// They are thin aliases here so the loader's many call sites read unchanged; the
+// cluster-scoped kind list and its safety invariant are documented at the source.
+func nsOf(kind, ns string) string { return contract.NamespaceFor(kind, ns) }
 
-func nsOf(kind, ns string) string {
-	if clusterScopedKinds[kind] {
-		return ""
-	}
-	if ns == "" {
-		return "default"
-	}
-	return ns
-}
-
-func uidOf(kind, ns, name string) string {
-	return fmt.Sprintf("uid:%s/%s/%s", kind, ns, name)
-}
+func uidOf(kind, ns, name string) string { return contract.SyntheticUID(kind, ns, name) }
 
 // selectorFrom resolves the flattened selector for a kind: Service uses a flat
 // map, NetworkPolicy uses spec.podSelector.matchLabels, others use
@@ -345,8 +313,8 @@ func matchLabels(raw json.RawMessage) (closure.LabelSelector, error) {
 // non-nil empty map (apimachinery "matches all"), but for an *authorisation* selector
 // that would be a silent namespace-wide over-grant; the engine treats the nil
 // selector as match-nothing (fail-safe, DESIGN §5). Both the legacy scope.yaml path
-// (parseScope) and the TaskContract path (parseTaskContract) need this identical
-// collapse, so it lives in one place.
+// (parseScope) and the TaskContract path (internal/contract) need this identical
+// collapse; each applies it to its own wire shape.
 func scopeSelectorFrom(raw json.RawMessage) (closure.LabelSelector, error) {
 	sel, err := matchLabels(raw)
 	if err != nil {
@@ -618,72 +586,9 @@ func parseScope(raw []byte) ([]closure.ScopeClause, error) {
 }
 
 // --- taskcontract -----------------------------------------------------------
-
-// rawTaskContract mirrors the TaskContract YAML wire form (DESIGN §6). Parsing it
-// here, in the dev/demo loader, keeps the public scope package YAML-free: scope only
-// ever sees the compiled struct. Each allow-clause's selector reuses the same
-// matchLabels conversion the cluster loader uses for Object.Selector — one selector
-// parse path — and namespace defaulting reuses nsOf, exactly as parseScope does.
-type rawTaskContract struct {
-	APIVersion string              `json:"apiVersion"`
-	Kind       string              `json:"kind"`
-	Metadata   rawTCMetadata       `json:"metadata"`
-	Spec       rawTaskContractSpec `json:"spec"`
-}
-
-type rawTCMetadata struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-}
-
-type rawTaskContractSpec struct {
-	Allow       []json.RawMessage `json:"allow"`
-	MaxSeverity string            `json:"maxSeverity"`
-}
-
-// rawAllowClause is one spec.allow entry. The selector dim's `{matchLabels,
-// matchExpressions}` lives at the clause top level (mirroring scope.yaml), so the
-// whole raw clause is handed to matchLabels.
-type rawAllowClause struct {
-	Dim       string `json:"dim"`
-	GVK       rawRef `json:"gvk"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-}
-
-// parseTaskContract maps the YAML wire form to a scope.TaskContract. It does not
-// validate the contract — that is scope.Compile's fail-closed job; the loader only
-// shapes the struct (resolving selectors and defaulting namespaces).
-func parseTaskContract(raw []byte) (scope.TaskContract, error) {
-	var rtc rawTaskContract
-	if err := yaml.Unmarshal(raw, &rtc); err != nil {
-		return scope.TaskContract{}, fmt.Errorf("parse taskcontract: %w", err)
-	}
-	allow := make([]scope.AllowClause, 0, len(rtc.Spec.Allow))
-	for _, rawClause := range rtc.Spec.Allow {
-		var rc rawAllowClause
-		if err := json.Unmarshal(rawClause, &rc); err != nil {
-			return scope.TaskContract{}, fmt.Errorf("parse allow clause: %w", err)
-		}
-		ac := scope.AllowClause{
-			Dim:       closure.ScopeDim(rc.Dim),
-			GVK:       closure.GVK{Group: rc.GVK.Group, Version: rc.GVK.Version, Kind: rc.GVK.Kind},
-			Namespace: nsOf(rc.GVK.Kind, rc.Namespace),
-			Name:      rc.Name,
-		}
-		if closure.ScopeDim(rc.Dim) == closure.DimSelector {
-			sel, err := scopeSelectorFrom(rawClause)
-			if err != nil {
-				return scope.TaskContract{}, fmt.Errorf("parse selector allow clause: %w", err)
-			}
-			ac.Selector = sel
-		}
-		allow = append(allow, ac)
-	}
-	return scope.TaskContract{
-		APIVersion: rtc.APIVersion,
-		Kind:       rtc.Kind,
-		Metadata:   scope.Metadata{Name: rtc.Metadata.Name, Namespace: rtc.Metadata.Namespace},
-		Spec:       scope.Spec{Allow: allow, MaxSeverity: scope.Severity(rtc.Spec.MaxSeverity)},
-	}, nil
-}
+//
+// The TaskContract wire form is parsed by internal/contract, not here. It is the ONE
+// parse path shared with the webhook, which reads the same shape out of a live
+// krsm.io/v1alpha1 TaskContract CR — so a contract cannot mean one thing to the CLI
+// and another in the cluster. It is also structurally strict (unknown fields are
+// rejected), which a loader-local parser was not.

@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -85,8 +87,16 @@ Commands:
                           which requests KRSM evaluates (default krsm.io/task;
                           "" gates everything); --agent-serviceaccount gates by
                           request identity (required for scale/eviction/exec —
-                          those payloads cannot carry annotations). Fails closed
-                          on unsynced cache, staleness, timeout, or any error.
+                          those payloads cannot carry annotations).
+                          Scope channels: --target-annotation (default
+                          krsm.io/target) re-roots the ownership derivation;
+                          --scope-annotation (default krsm.io/scope) names a
+                          TaskContract whose clauses are the scope.
+                          --allow-namespace and --allow-cluster-scoped-kind
+                          ("<Kind>[.<group>]") exempt shared boundaries an
+                          agent's INDIRECT collateral may reach — never the
+                          action target. Fails closed on unsynced cache,
+                          staleness, timeout, or any error.
   version                 Print the krsm version
   help                    Show this help
 
@@ -617,6 +627,25 @@ type serveOpts struct {
 	contextName          string
 	requestTimeout       time.Duration
 	resync               time.Duration
+	// allowNamespaces / allowClusterScopedKinds are the cross-boundary allowlist: the
+	// shared boundaries a DERIVED (L0/L1) scope's INDIRECT collateral may reach without
+	// escaping. They never exempt the action target itself (webhook.Allowlist).
+	allowNamespaces         string
+	allowClusterScopedKinds string
+	// targetAnnotation / scopeAnnotation are the keys of the two scope channels, so an
+	// operator can move them off krsm.io/ (or off a key another controller owns).
+	targetAnnotation string
+	scopeAnnotation  string
+}
+
+// contractGetter is the Level-3 seam as PACKAGE MAIN needs it: resolve a TaskContract CR
+// by a live read. It is declared here, at the consumer, rather than imported — webhook's
+// own seam type is unexported, so the design's literal `contracts contractGetter`
+// parameter cannot name it from this package. An interface value declared here assigns
+// cleanly to webhook.Config.Contracts (Go matches interface method sets structurally),
+// which keeps buildWebhookConfig pure and testable with a stub.
+type contractGetter interface {
+	Get(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error)
 }
 
 // runServe validates the serve flags FAIL-FAST (a webhook without TLS material or a
@@ -638,6 +667,10 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&o.contextName, "context", "", "kubeconfig context")
 	fs.DurationVar(&o.requestTimeout, "request-timeout", webhook.DefaultRequestTimeout, "per-request deadline (must be > 0 and < 30s, the webhook config's timeoutSeconds ceiling)")
 	fs.DurationVar(&o.resync, "resync", 0, "informer resync period (0 = watch deltas only)")
+	fs.StringVar(&o.allowNamespaces, "allow-namespace", "", "comma-separated namespaces whose resources a DERIVED scope's INDIRECT collateral may reach without escaping (never exempts the action target)")
+	fs.StringVar(&o.allowClusterScopedKinds, "allow-cluster-scoped-kind", "", `comma-separated cluster-scoped kinds exempt as indirect collateral, as "<Kind>[.<group>]" (e.g. "Node" = the core group's Node, "Foo.example.com")`)
+	fs.StringVar(&o.targetAnnotation, "target-annotation", webhook.DefaultTargetAnnotation, "annotation key naming the ref the ownership derivation is re-rooted at (Level 1)")
+	fs.StringVar(&o.scopeAnnotation, "scope-annotation", webhook.DefaultScopeAnnotation, "annotation key naming the TaskContract whose clauses are the request's scope (Level 3)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -656,6 +689,11 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	// Fail fast — BEFORE any cluster contact — when no gating signal is configured
 	// (finding 3: an all-empty config used to gate everything silently).
 	if _, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll); err != nil {
+		return err
+	}
+	// Same fail-fast posture for the allowlist: a malformed kind token must be reported
+	// before the informers start, not after a cache sync the operator waited for.
+	if _, err := parseAllowlist(o.allowNamespaces, o.allowClusterScopedKinds); err != nil {
 		return err
 	}
 	return serveWebhook(o, mode, stdout, stderr)
@@ -687,24 +725,88 @@ func agentMatcher(annotationKey, serviceAccounts string, gateAll bool) (webhook.
 	}
 }
 
-// buildWebhookConfig assembles the production webhook.Config from the flags and the
-// Provider. Pure and hermetically tested: only a test over this assembly catches a
-// dropped field before it silently disables a safety collaborator in production (PR #36
-// review finding 9). It returns the same matcher usage error as the runServe fail-fast.
-func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider) (webhook.Config, error) {
+// parseAllowlist assembles the cross-boundary webhook.Allowlist from the two
+// comma-separated serve flags. List items are trimmed and empty items dropped, so a
+// generated flag value's trailing comma cannot silently exempt the "" namespace.
+//
+// A cluster-scoped entry is "<Kind>[.<group>]" and keys on {Group, Kind}: a BARE Kind
+// means the CORE group and nothing else (a trailing dot says so explicitly), so listing
+// "Node" can never exempt some CRD group's own Node. That asymmetry is deliberate — the
+// grammar's permissive reading ("any group's Node") is exactly the cross-group identity
+// confusion the GroupKind key exists to prevent, so the narrow reading is the only one
+// offered. An entry with no Kind (".example.com") could never match a live ref, so it is
+// a usage error rather than a dead exemption the operator believes in.
+func parseAllowlist(namespaces, clusterScopedKinds string) (webhook.Allowlist, error) {
+	var a webhook.Allowlist
+	for _, ns := range splitList(namespaces) {
+		if a.Namespaces == nil {
+			a.Namespaces = map[string]bool{}
+		}
+		a.Namespaces[ns] = true
+	}
+	for _, tok := range splitList(clusterScopedKinds) {
+		kind, group, _ := strings.Cut(tok, ".") // no dot ⇒ core group, same as a trailing dot
+		if kind == "" {
+			return webhook.Allowlist{}, fmt.Errorf("serve: invalid --allow-cluster-scoped-kind %q (want \"<Kind>[.<group>]\", e.g. Node or Foo.example.com)", tok)
+		}
+		if a.ClusterScopedGroupKinds == nil {
+			a.ClusterScopedGroupKinds = map[closure.GVK]bool{}
+		}
+		// Version is deliberately zero: an exemption is about a kind, not about which
+		// version of it a request happens to name.
+		a.ClusterScopedGroupKinds[closure.GVK{Group: group, Kind: kind}] = true
+	}
+	return a, nil
+}
+
+// splitList splits a comma-separated flag value into trimmed, non-empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// buildWebhookConfig assembles the production webhook.Config from the flags, the
+// Provider and the injected contract getter. Pure and hermetically tested: only a test
+// over this assembly catches a dropped field before it silently disables a safety
+// collaborator in production (PR #36 review finding 9). It returns the same matcher and
+// allowlist usage errors as the runServe fail-fast.
+//
+// contracts is a PARAMETER, not something built here, because the Level-3 getter needs a
+// live dynamic client and this function must stay pure — serveWebhook, which already
+// holds the *rest.Config, constructs it and passes it in.
+func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider, contracts contractGetter) (webhook.Config, error) {
 	matcher, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll)
 	if err != nil {
 		return webhook.Config{}, err
 	}
-	return webhook.Config{
-		State:     provider,
-		ScopeInfo: provider,
-		Synced:    provider.HasSynced,
-		Fresh:     provider,
-		Mode:      mode,
-		Matcher:   matcher,
-		Timeout:   o.requestTimeout,
-	}, nil
+	allowlist, err := parseAllowlist(o.allowNamespaces, o.allowClusterScopedKinds)
+	if err != nil {
+		return webhook.Config{}, err
+	}
+	cfg := webhook.Config{
+		State:            provider,
+		ScopeInfo:        provider,
+		Synced:           provider.HasSynced,
+		Fresh:            provider,
+		Mode:             mode,
+		Matcher:          matcher,
+		Timeout:          o.requestTimeout,
+		Allowlist:        allowlist,
+		TargetAnnotation: o.targetAnnotation,
+		ScopeAnnotation:  o.scopeAnnotation,
+	}
+	if contracts != nil {
+		// Assigned only when non-nil: a typed-nil interface value would leave
+		// Config.Contracts non-nil while every read through it failed, which reads in a
+		// log as a broken getter rather than as the "L3 not wired" state it really is.
+		cfg.Contracts = contracts
+	}
+	return cfg, nil
 }
 
 // serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
@@ -733,7 +835,15 @@ var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error
 		return errors.New("serve: informer caches did not sync (fail-closed: not serving)")
 	}
 
-	whCfg, err := buildWebhookConfig(o, mode, provider)
+	// Level 3's contract getter: a LIVE GET through its own dynamic client, never an
+	// informer. It performs no discovery, so the webhook starts and serves L0/L1
+	// normally with no TaskContract CRD installed — the absence surfaces as a
+	// fail-closed deny on the L3 path only, and a CRD installed later needs no restart.
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	whCfg, err := buildWebhookConfig(o, mode, provider, webhook.NewDynamicContractGetter(dyn))
 	if err != nil {
 		return err
 	}

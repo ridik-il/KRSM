@@ -14,6 +14,21 @@ import (
 // parity-critical invariant (design §"Parity-critical").
 func referentKey(r closure.Ref) string { return r.String() }
 
+// gvkKey is the GROUP-AWARE exact object key: Group/Kind/namespace/name. It exists
+// beside byHuman (closure.Ref.String() — Kind/ns/name, group-BLIND) because that key
+// cannot separate two tracked kinds that share a Kind in different API groups: they
+// collide in one bucket and the later upsert wins. A scope root resolved through the
+// blind bucket can walk the WRONG subtree, so the ownership-root lookup keys here
+// instead (design rev 3, "Group-blind human key").
+//
+// The VERSION is deliberately not part of the key: a Group+Kind+namespace+name names
+// exactly one object in the cluster, versions being alternate representations of it —
+// the same reason Tracked matches version-insensitively. Including it would turn a
+// version skew between discovery and an informer's payload into a spurious miss.
+func gvkKey(gvk closure.GVK, namespace, name string) string {
+	return gvk.Group + "/" + gvk.Kind + "/" + namespace + "/" + name
+}
+
 // objKey is the stable per-object identity: the uid if present, else Kind/ns/name. It
 // mirrors closure.Ref.key() so an object updates/deletes the exact entries it inserted.
 func objKey(r closure.Ref) string {
@@ -47,8 +62,9 @@ type contribution struct {
 // projections (never raw API objects), so Secret/ConfigMap data is structurally absent.
 type index struct {
 	mu       sync.RWMutex
-	byUID    map[string]*closure.Object // uid          → object (Get fast path)
-	byHuman  map[string]*closure.Object // Kind/ns/name → object (Get fallback)
+	byUID    map[string]*closure.Object // uid                    → object (Get fast path)
+	byHuman  map[string]*closure.Object // Kind/ns/name           → object (Get fallback, group-blind)
+	byGVK    map[string]*closure.Object // Group/Kind/ns/name     → object (exact, group-aware)
 	owner    map[string][]closure.Ref   // owner uid    → child refs
 	ns       map[string][]closure.Ref   // namespace    → contained refs (excl. Kind=Namespace)
 	selOwner map[string][]closure.Ref   // namespace    → Service/PDB/NetworkPolicy refs
@@ -61,6 +77,7 @@ func newIndex() *index {
 	return &index{
 		byUID:    map[string]*closure.Object{},
 		byHuman:  map[string]*closure.Object{},
+		byGVK:    map[string]*closure.Object{},
 		owner:    map[string][]closure.Ref{},
 		ns:       map[string][]closure.Ref{},
 		selOwner: map[string][]closure.Ref{},
@@ -92,6 +109,7 @@ func (ix *index) upsertWithRV(o closure.Object, rv string) {
 	c := &contribution{ref: o.Ref}
 
 	ix.byHuman[o.Ref.String()] = &stored
+	ix.byGVK[gvkKey(o.Ref.GVK, o.Ref.Namespace, o.Ref.Name)] = &stored
 	if o.Ref.UID != "" {
 		ix.byUID[o.Ref.UID] = &stored
 		c.uid = o.Ref.UID
@@ -146,6 +164,7 @@ func (ix *index) removeLocked(key string) {
 		return
 	}
 	delete(ix.byHuman, c.ref.String())
+	delete(ix.byGVK, gvkKey(c.ref.GVK, c.ref.Namespace, c.ref.Name))
 	if c.uid != "" {
 		delete(ix.byUID, c.uid)
 	}
@@ -174,6 +193,16 @@ func (ix *index) get(r closure.Ref) (*closure.Object, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.lookupLocked(r)
+}
+
+// getByGVK is the exact, GROUP-AWARE lookup: it answers only for the object whose
+// Group+Kind+namespace+name match, never falling back to the ambiguous human bucket.
+// A miss is reported as false — the caller must fail closed, not guess.
+func (ix *index) getByGVK(gvk closure.GVK, namespace, name string) (*closure.Object, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	o, ok := ix.byGVK[gvkKey(gvk, namespace, name)]
+	return o, ok
 }
 
 // rvFor returns the cached resourceVersion for r (uid first, then Kind/ns/name), if the

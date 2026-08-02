@@ -30,7 +30,25 @@ const (
 	// (transient sync) and escape (computed) — a correct install generates the webhook
 	// rules from the tracked set, so this state is unreachable in production (slice 7).
 	reasonUntracked reasonCode = "untracked"
+	// reasonScopeUnresolved: the request DECLARED a scope (krsm.io/target, and later
+	// krsm.io/scope) that is well-formed but cannot be resolved — an unknown or
+	// ambiguous kind token, a missing/unreadable contract. Distinct from invalid
+	// (malformed syntax) so operators can grep a typo apart from a broken reference.
+	// It fails closed in BOTH modes: audit softens only a COMPUTED escape, never an
+	// unverifiable scope claim, and falling back to L0 would hide the declared intent.
+	reasonScopeUnresolved reasonCode = "scope-unresolved"
 )
+
+// provenanceAuditKey is the response AuditAnnotations key carrying the resolved scope
+// provenance (ADR-0011). The API server copies it into its audit record, so operators
+// can query how a verdict's scope arose — machine-readable, rather than only inside the
+// human status message / warning text.
+const provenanceAuditKey = "krsm.io/scope-provenance"
+
+// exemptedAuditKey is the response AuditAnnotations key naming the refs the
+// cross-boundary allowlist dropped from the escape set. It is set ONLY when an exemption
+// occurred, so an audit query can find every verdict a server flag softened.
+const exemptedAuditKey = "krsm.io/allowlist-exempted"
 
 // reason renders one credential-free reason string: "krsm:<code>: <detail>". It is
 // the ONLY reason format the webhook emits (approved plan lean 4).
@@ -44,23 +62,44 @@ type Config struct {
 	ScopeInfo clusterInfo
 	Synced    func() bool
 	Mode      scope.Mode
-	Matcher   AgentMatcher                     // nil → MatchAll{} (gate everything — library-conservative)
-	Fresh     Freshness                        // required (New rejects nil); NoFreshness explicitly disables the staleness guard
-	Timeout   time.Duration                    // per-request deadline; 0 → DefaultRequestTimeout (must stay below the webhook config's timeoutSeconds)
-	Logf      func(format string, args ...any) // nil → log.Printf
+	Matcher   AgentMatcher  // nil → MatchAll{} (gate everything — library-conservative)
+	Fresh     Freshness     // required (New rejects nil); NoFreshness explicitly disables the staleness guard
+	Timeout   time.Duration // per-request deadline; 0 → DefaultRequestTimeout (must stay below the webhook config's timeoutSeconds)
+	Allowlist Allowlist     // cross-boundary escape hatch for derived scopes; zero value exempts nothing
+	// Contracts resolves the TaskContract a krsm.io/scope annotation names, by live
+	// GET. nil DISABLES L3: a request that declares krsm.io/scope then fails closed
+	// (scope-unresolved) rather than silently falling back to the derived tree, which
+	// would grant a scope the author never asked for. L0/L1 are unaffected.
+	Contracts contractGetter
+	// TargetAnnotation and ScopeAnnotation are the annotation keys the two scope
+	// channels are read from — the L1 re-root and the L3 contract reference. They are
+	// CONFIGURATION, not constants, so an operator can move KRSM's channels onto their
+	// own domain (or off a key another controller already owns) without a fork. Empty
+	// means the defaults, DefaultTargetAnnotation and DefaultScopeAnnotation.
+	//
+	// Reconfiguring a key makes the OLD key inert, which is the safe direction: an
+	// unrecognised key falls to the L0 derived tree of the request's own target, which
+	// is never wider than the re-root or contract the annotation named.
+	TargetAnnotation string
+	ScopeAnnotation  string
+	Logf             func(format string, args ...any) // nil → log.Printf
 }
 
 // Server evaluates AdmissionReviews against the indexed live state. Validating only:
 // it never sets a patch and never mutates the request.
 type Server struct {
-	state   closure.State
-	info    clusterInfo
-	synced  func() bool
-	mode    scope.Mode
-	matcher AgentMatcher
-	fresh   Freshness
-	timeout time.Duration
-	logf    func(string, ...any)
+	state     closure.State
+	info      clusterInfo
+	synced    func() bool
+	mode      scope.Mode
+	matcher   AgentMatcher
+	fresh     Freshness
+	timeout   time.Duration
+	allowlist Allowlist
+	contracts contractGetter
+	targetKey string // annotation key of the L1 re-root channel (never empty after New)
+	scopeKey  string // annotation key of the L3 contract channel (never empty after New)
+	logf      func(string, ...any)
 }
 
 // New builds a Server, rejecting an incomplete Config: a webhook without state, a
@@ -87,7 +126,22 @@ func New(c Config) (*Server, error) {
 	if timeout <= 0 {
 		timeout = DefaultRequestTimeout
 	}
-	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, logf: logf}, nil
+	targetKey, scopeKey := c.TargetAnnotation, c.ScopeAnnotation
+	if targetKey == "" {
+		targetKey = DefaultTargetAnnotation
+	}
+	if scopeKey == "" {
+		scopeKey = DefaultScopeAnnotation
+	}
+	// One key cannot serve both channels: resolveScope reads L3 first, so a shared key
+	// would make every L1 re-root value parse as a contract reference and deny. That is
+	// fail-closed, but it is an unserveable configuration — refuse it at startup rather
+	// than deny every governed request in production. Checked AFTER defaulting so
+	// half-configuring onto the other channel's default is caught too.
+	if targetKey == scopeKey {
+		return nil, fmt.Errorf("webhook: TargetAnnotation and ScopeAnnotation are both %q; the two scope channels need distinct keys", targetKey)
+	}
+	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, allowlist: c.Allowlist, contracts: c.Contracts, targetKey: targetKey, scopeKey: scopeKey, logf: logf}, nil
 }
 
 // Handle evaluates one decoded AdmissionReview and returns the response review. It is
@@ -195,7 +249,13 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 		}
 	}
 
-	pred := scope.Derive(action.Target)
+	// Scope channel (ADR-0011): L1 krsm.io/target re-root over L0 derived, read from
+	// oldObject only. An unresolvable declared scope denies here — never a silent
+	// downgrade to the derived tree.
+	pred, rc, err := s.resolveScope(ctx, req, oldU, action.Target)
+	if err != nil {
+		return respond(review, deny(rc, err.Error()))
+	}
 	dec := closure.Safe(s.state, action, pred.Clauses)
 
 	// Staleness guard: confirm the cache is current for the request, bounded to the
@@ -221,8 +281,28 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 		return respond(review, deny(reasonInternal, "request deadline exceeded"))
 	}
 
+	// Cross-boundary allowlist: for DERIVED scopes only, drop the exempt INDIRECT
+	// escapes before the mode is applied, so audit's downgrade describes the RESIDUAL
+	// escape set an operator actually has to act on.
+	var exempted []closure.Ref
+	if allowlistApplies(pred.Provenance) {
+		dec, exempted = s.allowlist.filterEscapes(dec, action.Target)
+	}
+
 	dec = s.mode.Apply(dec)
-	return respond(review, decisionResponse(dec, pred.Provenance))
+	resp := decisionResponse(dec, pred.Provenance)
+	// Structured provenance on every DECIDED response (Allow included — an Allow is the
+	// case whose message says nothing). Denials raised before resolveScope ran carry no
+	// provenance: an audit record must not report a scope that was never resolved.
+	resp.AuditAnnotations = map[string]string{provenanceAuditKey: string(pred.Provenance)}
+	if len(exempted) > 0 {
+		// Only when an exemption actually happened. An always-present key would make
+		// "an operator flag widened this verdict" indistinguishable from "nothing was
+		// exempted" in an audit query — and the exempted refs appear NOWHERE else, since
+		// the message reports only the residual set.
+		resp.AuditAnnotations[exemptedAuditKey] = closure.JoinRefs(exempted)
+	}
+	return respond(review, resp)
 }
 
 // decisionResponse maps the applied Decision to an AdmissionResponse: Block denies
