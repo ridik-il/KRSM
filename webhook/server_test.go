@@ -252,3 +252,8 @@ func TestHandleResponseInvariants(t *testing.T) {
 		}
 	}
 }
+
+// withAnnotationKeys configures the two scope channels' annotation keys.
+func withAnnotationKeys(target, scopeKey string) func(*Config) {
+	return func(c *Config) { c.TargetAnnotation, c.ScopeAnnotation = target, scopeKey }
+}

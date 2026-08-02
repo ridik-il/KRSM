@@ -71,7 +71,18 @@ type Config struct {
 	// (scope-unresolved) rather than silently falling back to the derived tree, which
 	// would grant a scope the author never asked for. L0/L1 are unaffected.
 	Contracts contractGetter
-	Logf      func(format string, args ...any) // nil → log.Printf
+	// TargetAnnotation and ScopeAnnotation are the annotation keys the two scope
+	// channels are read from — the L1 re-root and the L3 contract reference. They are
+	// CONFIGURATION, not constants, so an operator can move KRSM's channels onto their
+	// own domain (or off a key another controller already owns) without a fork. Empty
+	// means the defaults, DefaultTargetAnnotation and DefaultScopeAnnotation.
+	//
+	// Reconfiguring a key makes the OLD key inert, which is the safe direction: an
+	// unrecognised key falls to the L0 derived tree of the request's own target, which
+	// is never wider than the re-root or contract the annotation named.
+	TargetAnnotation string
+	ScopeAnnotation  string
+	Logf             func(format string, args ...any) // nil → log.Printf
 }
 
 // Server evaluates AdmissionReviews against the indexed live state. Validating only:
@@ -86,6 +97,8 @@ type Server struct {
 	timeout   time.Duration
 	allowlist Allowlist
 	contracts contractGetter
+	targetKey string // annotation key of the L1 re-root channel (never empty after New)
+	scopeKey  string // annotation key of the L3 contract channel (never empty after New)
 	logf      func(string, ...any)
 }
 
@@ -113,7 +126,22 @@ func New(c Config) (*Server, error) {
 	if timeout <= 0 {
 		timeout = DefaultRequestTimeout
 	}
-	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, allowlist: c.Allowlist, contracts: c.Contracts, logf: logf}, nil
+	targetKey, scopeKey := c.TargetAnnotation, c.ScopeAnnotation
+	if targetKey == "" {
+		targetKey = DefaultTargetAnnotation
+	}
+	if scopeKey == "" {
+		scopeKey = DefaultScopeAnnotation
+	}
+	// One key cannot serve both channels: resolveScope reads L3 first, so a shared key
+	// would make every L1 re-root value parse as a contract reference and deny. That is
+	// fail-closed, but it is an unserveable configuration — refuse it at startup rather
+	// than deny every governed request in production. Checked AFTER defaulting so
+	// half-configuring onto the other channel's default is caught too.
+	if targetKey == scopeKey {
+		return nil, fmt.Errorf("webhook: TargetAnnotation and ScopeAnnotation are both %q; the two scope channels need distinct keys", targetKey)
+	}
+	return &Server{state: c.State, info: c.ScopeInfo, synced: c.Synced, mode: c.Mode, matcher: matcher, fresh: c.Fresh, timeout: timeout, allowlist: c.Allowlist, contracts: c.Contracts, targetKey: targetKey, scopeKey: scopeKey, logf: logf}, nil
 }
 
 // Handle evaluates one decoded AdmissionReview and returns the response review. It is

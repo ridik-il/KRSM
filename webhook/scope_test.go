@@ -104,7 +104,7 @@ func TestResolveScopeNoAnnotationIsDerived(t *testing.T) {
 func TestResolveScopeTargetAnnotationReRoots(t *testing.T) {
 	s := newTestServer(t, reRootState(), scope.ModeAudit, withObjects(reRootObjects()))
 
-	out := s.Handle(context.Background(), rsDeleteReview("l1", annotations(targetAnnotation, "Deployment/prod/web")))
+	out := s.Handle(context.Background(), rsDeleteReview("l1", annotations(DefaultTargetAnnotation, "Deployment/prod/web")))
 	if out.Response == nil || !out.Response.Allowed {
 		t.Fatalf("re-rooted delete must be allowed, got %#v", out.Response)
 	}
@@ -114,7 +114,7 @@ func TestResolveScopeTargetAnnotationReRoots(t *testing.T) {
 
 	// A re-root that does NOT cover the closure still reports an escape, and names
 	// the annotation provenance so the operator can tell L1 from L0.
-	out = s.Handle(context.Background(), rsDeleteReview("l1b", annotations(targetAnnotation, "ReplicaSet.apps/prod/web-1")))
+	out = s.Handle(context.Background(), rsDeleteReview("l1b", annotations(DefaultTargetAnnotation, "ReplicaSet.apps/prod/web-1")))
 	warn := strings.Join(out.Response.Warnings, "\n")
 	if !strings.Contains(warn, string(scope.ProvenanceAnnotation)) {
 		t.Errorf("warnings %q must report the annotation provenance", warn)
@@ -153,7 +153,7 @@ func widgetObjects() []closure.Object {
 // derivation there.
 func TestResolveScopeGroupQualifiedKindReRoots(t *testing.T) {
 	s := newTestServer(t, widgetState(), scope.ModeEnforce, withObjects(widgetObjects()))
-	out := s.Handle(context.Background(), rsDeleteReview("q", annotations(targetAnnotation, "Widget.a.example.com/prod/wa")))
+	out := s.Handle(context.Background(), rsDeleteReview("q", annotations(DefaultTargetAnnotation, "Widget.a.example.com/prod/wa")))
 	if out.Response == nil || !out.Response.Allowed {
 		t.Fatalf("group-qualified re-root must resolve and cover the closure, got %#v", out.Response)
 	}
@@ -166,7 +166,7 @@ func TestResolveScopeGroupQualifiedKindReRoots(t *testing.T) {
 func TestResolveScopeAmbiguousKindFailsClosed(t *testing.T) {
 	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
 		out := newTestServer(t, widgetState(), mode).
-			Handle(context.Background(), rsDeleteReview("amb", annotations(targetAnnotation, "Widget/prod/wa")))
+			Handle(context.Background(), rsDeleteReview("amb", annotations(DefaultTargetAnnotation, "Widget/prod/wa")))
 		if out.Response.Allowed {
 			t.Errorf("mode %s: an ambiguous kind token must fail closed, got allow", mode)
 			continue
@@ -181,7 +181,7 @@ func TestResolveScopeAmbiguousKindFailsClosed(t *testing.T) {
 	}
 
 	out := newTestServer(t, widgetState(), scope.ModeEnforce, withObjects(widgetObjects())).
-		Handle(context.Background(), rsDeleteReview("amb-ok", annotations(targetAnnotation, "Widget.a.example.com/prod/wa")))
+		Handle(context.Background(), rsDeleteReview("amb-ok", annotations(DefaultTargetAnnotation, "Widget.a.example.com/prod/wa")))
 	if !out.Response.Allowed {
 		t.Errorf("the qualified form of the same Kind must resolve, got deny %q", out.Response.Result.Message)
 	}
@@ -198,7 +198,7 @@ func TestResolveScopeUnknownKindFailsClosed(t *testing.T) {
 		"ReplicaSet./prod/web-1",       // tracked Kind, explicitly core group
 	} {
 		out := newTestServer(t, widgetState(), scope.ModeEnforce).
-			Handle(context.Background(), rsDeleteReview("unk", annotations(targetAnnotation, target)))
+			Handle(context.Background(), rsDeleteReview("unk", annotations(DefaultTargetAnnotation, target)))
 		if out.Response.Allowed {
 			t.Errorf("%s: an unresolvable kind token must fail closed, got allow", target)
 			continue
@@ -246,7 +246,7 @@ func TestResolveScopeReRootIsPinnedByUID(t *testing.T) {
 	objs := collidingWidgetState()
 	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs))
 
-	out := s.Handle(context.Background(), rsDeleteReview("uid-a", annotations(targetAnnotation, "Widget.a.example.com/prod/w")))
+	out := s.Handle(context.Background(), rsDeleteReview("uid-a", annotations(DefaultTargetAnnotation, "Widget.a.example.com/prod/w")))
 	if !out.Response.Allowed {
 		t.Errorf("re-root at the group that OWNS the subtree must cover the closure, got deny %q", out.Response.Result.Message)
 	}
@@ -254,7 +254,7 @@ func TestResolveScopeReRootIsPinnedByUID(t *testing.T) {
 	// The mirror: the same Kind/ns/name in the other group owns nothing, so the very
 	// same closure escapes. Both re-roots resolving alike would prove the group is
 	// being ignored.
-	out = s.Handle(context.Background(), rsDeleteReview("uid-b", annotations(targetAnnotation, "Widget.b.example.com/prod/w")))
+	out = s.Handle(context.Background(), rsDeleteReview("uid-b", annotations(DefaultTargetAnnotation, "Widget.b.example.com/prod/w")))
 	if out.Response.Allowed {
 		t.Error("re-root at the group that owns NOTHING must not cover the closure, got allow")
 	}
@@ -303,7 +303,7 @@ func TestResolveScopeUnresolvableRootFailsClosed(t *testing.T) {
 	objs := absentRootCollisionState()
 	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
 		s := newTestServer(t, closure.NewScanState(objs), mode, withObjects(objs))
-		out := s.Handle(context.Background(), rsDeleteReview("ghost-"+string(mode), annotations(targetAnnotation, "Widget.a.example.com/prod/w")))
+		out := s.Handle(context.Background(), rsDeleteReview("ghost-"+string(mode), annotations(DefaultTargetAnnotation, "Widget.a.example.com/prod/w")))
 		if out.Response.Allowed {
 			t.Errorf("mode %s: a re-root at an object absent from its OWN group must fail closed, got allow (the other group's subtree authorised it)", mode)
 			continue
@@ -317,7 +317,7 @@ func TestResolveScopeUnresolvableRootFailsClosed(t *testing.T) {
 	// covers the closure, so the deny above is about resolution, not about the fixture
 	// being unauthorisable.
 	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs))
-	out := s.Handle(context.Background(), rsDeleteReview("present", annotations(targetAnnotation, "Widget.b.example.com/prod/w")))
+	out := s.Handle(context.Background(), rsDeleteReview("present", annotations(DefaultTargetAnnotation, "Widget.b.example.com/prod/w")))
 	if !out.Response.Allowed {
 		t.Errorf("the root that DOES exist must resolve and cover its subtree, got deny %q", out.Response.Result.Message)
 	}
@@ -342,7 +342,7 @@ func TestResolveScopeMalformedTargetFailsClosedInvalid(t *testing.T) {
 		"cluster-scoped with ns": "PersistentVolume/prod/pv-1",
 	} {
 		out := newTestServer(t, reRootState(), scope.ModeEnforce).
-			Handle(context.Background(), rsDeleteReview("bad", annotations(targetAnnotation, value)))
+			Handle(context.Background(), rsDeleteReview("bad", annotations(DefaultTargetAnnotation, value)))
 		if out.Response.Allowed {
 			t.Errorf("%s (%q): a malformed target must fail closed, got allow", name, value)
 			continue
@@ -360,7 +360,7 @@ func TestResolveScopeMalformedTargetFailsClosedInvalid(t *testing.T) {
 	pv := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "PersistentVolume"}, Name: "pv-1", UID: "uid-pv"}}
 	objs := append(reRootObjects(), pv)
 	out := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs)).
-		Handle(context.Background(), rsDeleteReview("pv", annotations(targetAnnotation, "PersistentVolume//pv-1")))
+		Handle(context.Background(), rsDeleteReview("pv", annotations(DefaultTargetAnnotation, "PersistentVolume//pv-1")))
 	msg := out.Response.Result.Message
 	if strings.Contains(msg, string(reasonInvalid)) || strings.Contains(msg, string(reasonScopeUnresolved)) {
 		t.Errorf("a cluster-scoped ref with an empty namespace is well-formed and resolvable, got %q", msg)
@@ -390,7 +390,7 @@ func TestResolveScopeTargetAnnotationIsNotSelfAuthorizing(t *testing.T) {
 			},
 		}
 	}
-	reRoot := annotations(targetAnnotation, "Deployment/prod/web")
+	reRoot := annotations(DefaultTargetAnnotation, "Deployment/prod/web")
 
 	s := newTestServer(t, reRootState(), scope.ModeAudit, withObjects(reRootObjects()))
 	out := s.Handle(context.Background(), podRelabel("self", "", reRoot))
@@ -420,7 +420,7 @@ func TestHandleReportsScopeProvenanceInAuditAnnotations(t *testing.T) {
 		want   scope.Provenance
 	}{
 		"derived warn": {rsDeleteReview("prov-l0", ""), scope.ProvenanceDerivedOwner},
-		"annotation allow": {rsDeleteReview("prov-l1", annotations(targetAnnotation, "Deployment/prod/web")),
+		"annotation allow": {rsDeleteReview("prov-l1", annotations(DefaultTargetAnnotation, "Deployment/prod/web")),
 			scope.ProvenanceAnnotation},
 	} {
 		out := s.Handle(context.Background(), tc.review)
@@ -434,7 +434,7 @@ func TestHandleReportsScopeProvenanceInAuditAnnotations(t *testing.T) {
 	objs := reRootObjects()
 	cr := taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`)
 	l3 := newTestServer(t, closure.NewScanState(objs), scope.ModeAudit, withObjects(objs), withContracts(contractsWith(cr)))
-	out := l3.Handle(context.Background(), rsDeleteReview("prov-l3", annotations(scopeAnnotation, "prod/task-1")))
+	out := l3.Handle(context.Background(), rsDeleteReview("prov-l3", annotations(DefaultScopeAnnotation, "prod/task-1")))
 	if got := out.Response.AuditAnnotations[provenanceAuditKey]; got != string(scope.ProvenanceContract) {
 		t.Errorf("contract allow: AuditAnnotations[%s] = %q, want %q", provenanceAuditKey, got, scope.ProvenanceContract)
 	}
@@ -589,7 +589,7 @@ func pvDeleteReview(uid, annotations string) admissionv1.AdmissionReview {
 // it (L1), which is exactly the configuration an attacker would choose.
 func TestAllowlistNeverExemptsTheActionTarget(t *testing.T) {
 	dep := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web", UID: "uid-d"}}
-	reRoot := annotations(targetAnnotation, "Deployment.apps/prod/web")
+	reRoot := annotations(DefaultTargetAnnotation, "Deployment.apps/prod/web")
 
 	objs := append(secretState(), dep)
 	st := closure.NewScanState(objs)
@@ -713,7 +713,7 @@ func TestAllowlistAppliesToDerivedProvenanceOnly(t *testing.T) {
 	objs := []closure.Object{dep, secret, secretConsumer(gatewayGVK, "infra", "gw", "uid-gw")}
 	out := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs),
 		withAllowlist(Allowlist{Namespaces: map[string]bool{"infra": true}})).
-		Handle(context.Background(), secretDeleteReview("l1-allow", annotations(targetAnnotation, "Deployment.apps/prod/web")))
+		Handle(context.Background(), secretDeleteReview("l1-allow", annotations(DefaultTargetAnnotation, "Deployment.apps/prod/web")))
 	if !out.Response.Allowed {
 		t.Errorf("an L1 (annotation) decision must still be filtered by the allowlist, got deny %q", out.Response.Result.Message)
 	}
@@ -749,13 +749,26 @@ func withContracts(c contractGetter) func(*Config) {
 	return func(cfg *Config) { cfg.Contracts = c }
 }
 
-// taskContractCR builds a TaskContract CR as the API server would hand it back —
-// unstructured, so the test exercises the same unstructured→JSON→contract.Parse path
-// production uses rather than a Go struct short-cut.
+// taskContractCR builds a TaskContract CR as the API server really hands it back:
+// unstructured, so the test exercises the same unstructured→JSON→parse path production
+// uses rather than a Go struct short-cut, AND carrying the fields the SERVER owns —
+// creationTimestamp, uid, resourceVersion, generation, managedFields, plus the status a
+// subresource returns.
+//
+// Those server-populated fields are not decoration. An earlier version of this helper
+// wrote metadata with only name and namespace while claiming to be "as the API server
+// would hand it back"; it was not, and the whole L3 family passed against an object no
+// cluster would ever produce, while a strict whole-document decode rejected every real
+// one. A fixture that is cleaner than production is a blind spot, not a simplification.
 func taskContractCR(t *testing.T, namespace, name string, allow ...string) *unstructured.Unstructured {
 	t.Helper()
 	body := `{"apiVersion":"krsm.io/v1alpha1","kind":"TaskContract","metadata":{"name":"` + name +
-		`","namespace":"` + namespace + `"},"spec":{"allow":[` + strings.Join(allow, ",") + `]}}`
+		`","namespace":"` + namespace + `","uid":"9f1c1b8e-0f1a-4a3a-9c2b-0b6a1f2d3e4f",` +
+		`"resourceVersion":"4711","generation":1,"creationTimestamp":"2026-08-01T10:00:00Z",` +
+		`"managedFields":[{"manager":"kubectl-client-side-apply","operation":"Update",` +
+		`"apiVersion":"krsm.io/v1alpha1","time":"2026-08-01T10:00:00Z","fieldsType":"FieldsV1",` +
+		`"fieldsV1":{"f:spec":{"f:allow":{}}}}]},"status":{},` +
+		`"spec":{"allow":[` + strings.Join(allow, ",") + `]}}`
 	u := &unstructured.Unstructured{}
 	if err := u.UnmarshalJSON([]byte(body)); err != nil {
 		t.Fatalf("taskContractCR: %v", err)
@@ -789,7 +802,7 @@ func TestResolveScopeContractAllowsCollateral(t *testing.T) {
 
 	cr := taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`)
 	s := newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withContracts(contractsWith(cr)))
-	out = s.Handle(context.Background(), rsDeleteReview("l3", annotations(scopeAnnotation, "prod/task-1")))
+	out = s.Handle(context.Background(), rsDeleteReview("l3", annotations(DefaultScopeAnnotation, "prod/task-1")))
 	if !out.Response.Allowed {
 		t.Fatalf("a contract authorising the collateral must ALLOW, got deny %q", out.Response.Result.Message)
 	}
@@ -814,7 +827,7 @@ func TestResolveScopeContractOwnershipRootDefaultsToContractNamespace(t *testing
 		`{"dim":"ownership","root":{"group":"apps","version":"v1","kind":"Deployment","name":"web"}}`)
 
 	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs), withContracts(contractsWith(cr)))
-	out := s.Handle(context.Background(), rsDeleteReview("l3-tree", annotations(scopeAnnotation, "prod/tree")))
+	out := s.Handle(context.Background(), rsDeleteReview("l3-tree", annotations(DefaultScopeAnnotation, "prod/tree")))
 	if !out.Response.Allowed {
 		t.Fatalf("an ownership root with no namespace must resolve in the CONTRACT's namespace and cover its subtree, got deny %q", out.Response.Result.Message)
 	}
@@ -844,7 +857,7 @@ func TestResolveScopeContractOwnershipRootIsResolvedGroupAware(t *testing.T) {
 	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
 		cr := taskContractCR(t, "prod", "ghost", root("a.example.com"))
 		out := newTestServer(t, st, mode, withObjects(objs), withContracts(contractsWith(cr))).
-			Handle(context.Background(), rsDeleteReview("l3-ghost-"+string(mode), annotations(scopeAnnotation, "prod/ghost")))
+			Handle(context.Background(), rsDeleteReview("l3-ghost-"+string(mode), annotations(DefaultScopeAnnotation, "prod/ghost")))
 		if out.Response.Allowed {
 			t.Errorf("mode %s: a contract root absent from its OWN group must fail closed, got allow (the other group's subtree authorised it)", mode)
 			continue
@@ -858,7 +871,7 @@ func TestResolveScopeContractOwnershipRootIsResolvedGroupAware(t *testing.T) {
 	// so the denies above are about resolution, not about ownership roots being unusable.
 	cr := taskContractCR(t, "prod", "real", root("b.example.com"))
 	out := newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withContracts(contractsWith(cr))).
-		Handle(context.Background(), rsDeleteReview("l3-real", annotations(scopeAnnotation, "prod/real")))
+		Handle(context.Background(), rsDeleteReview("l3-real", annotations(DefaultScopeAnnotation, "prod/real")))
 	if !out.Response.Allowed {
 		t.Errorf("the contract root that DOES exist must resolve and cover its subtree, got deny %q", out.Response.Result.Message)
 	}
@@ -919,7 +932,7 @@ func TestResolveScopeContractFailuresFailClosed(t *testing.T) {
 				opts = append(opts, withContracts(getter))
 			}
 			out := newTestServer(t, st, mode, opts...).
-				Handle(ctx, rsDeleteReview("fail", annotations(scopeAnnotation, "prod/task-1")))
+				Handle(ctx, rsDeleteReview("fail", annotations(DefaultScopeAnnotation, "prod/task-1")))
 			if out.Response.Allowed {
 				t.Errorf("%s / mode %s: an unresolvable contract must fail closed, got allow", name, mode)
 				continue
@@ -945,7 +958,7 @@ func TestResolveScopeContractCrossNamespaceFailsClosed(t *testing.T) {
 
 	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
 		out := newTestServer(t, closure.NewScanState(objs), mode, withObjects(objs), withContracts(permissive)).
-			Handle(context.Background(), rsDeleteReview("xns-"+string(mode), annotations(scopeAnnotation, "staging/task-1")))
+			Handle(context.Background(), rsDeleteReview("xns-"+string(mode), annotations(DefaultScopeAnnotation, "staging/task-1")))
 		if out.Response.Allowed {
 			t.Errorf("mode %s: a cross-namespace contract reference must fail closed, got allow", mode)
 			continue
@@ -968,7 +981,7 @@ func TestResolveScopeContractCrossNamespaceFailsClosed(t *testing.T) {
 	clusterScoped := contractsWith(taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`))
 	for _, mode := range []scope.Mode{scope.ModeAudit, scope.ModeEnforce} {
 		out := newTestServer(t, closure.NewScanState(pvObjs), mode, withObjects(pvObjs), withContracts(clusterScoped)).
-			Handle(context.Background(), pvDeleteReview("cs-l3-"+string(mode), annotations(scopeAnnotation, "prod/task-1")))
+			Handle(context.Background(), pvDeleteReview("cs-l3-"+string(mode), annotations(DefaultScopeAnnotation, "prod/task-1")))
 		if out.Response.Allowed {
 			t.Errorf("mode %s: a cluster-scoped request must not be able to use L3, got allow", mode)
 			continue
@@ -1002,7 +1015,7 @@ func TestResolveScopeMalformedContractRefFailsClosedInvalid(t *testing.T) {
 		"both empty segments": "/",
 	} {
 		out := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs), withContracts(present)).
-			Handle(context.Background(), rsDeleteReview("badref", annotations(scopeAnnotation, value)))
+			Handle(context.Background(), rsDeleteReview("badref", annotations(DefaultScopeAnnotation, value)))
 		if out.Response.Allowed {
 			t.Errorf("%s (%q): a malformed contract reference must fail closed, got allow", name, value)
 			continue
@@ -1038,14 +1051,14 @@ func TestL3UnavailabilityDoesNotDisableL0AndL1(t *testing.T) {
 	}
 
 	// L1: the re-root still resolves and covers the closure.
-	out = s.Handle(context.Background(), rsDeleteReview("avail-l1", annotations(targetAnnotation, "Deployment/prod/web")))
+	out = s.Handle(context.Background(), rsDeleteReview("avail-l1", annotations(DefaultTargetAnnotation, "Deployment/prod/web")))
 	if !out.Response.Allowed || len(out.Response.Warnings) != 0 {
 		t.Errorf("L1 must still re-root while L3 is down; got allowed=%v warnings=%q", out.Response.Allowed, out.Response.Warnings)
 	}
 
 	// The control: an L3 request on the SAME server does fail closed, so the two
 	// assertions above are about isolation, not about the getter being ignored.
-	out = s.Handle(context.Background(), rsDeleteReview("avail-l3", annotations(scopeAnnotation, "prod/task-1")))
+	out = s.Handle(context.Background(), rsDeleteReview("avail-l3", annotations(DefaultScopeAnnotation, "prod/task-1")))
 	if out.Response.Allowed {
 		t.Error("the L3 request on the same server must fail closed, got allow")
 	}
@@ -1068,14 +1081,14 @@ func TestResolveScopeContractOutranksTargetAnnotation(t *testing.T) {
 	s := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs), withContracts(narrow))
 
 	// Control: the target annotation ALONE allows this delete.
-	out := s.Handle(context.Background(), rsDeleteReview("prio-ctl", annotations(targetAnnotation, "Deployment/prod/web")))
+	out := s.Handle(context.Background(), rsDeleteReview("prio-ctl", annotations(DefaultTargetAnnotation, "Deployment/prod/web")))
 	if !out.Response.Allowed {
 		t.Fatalf("control: the target annotation alone must allow, else test 27 proves nothing; got deny %q", out.Response.Result.Message)
 	}
 
 	out = s.Handle(context.Background(), rsDeleteReview("prio", annotations(
-		targetAnnotation, "Deployment/prod/web",
-		scopeAnnotation, "prod/narrow")))
+		DefaultTargetAnnotation, "Deployment/prod/web",
+		DefaultScopeAnnotation, "prod/narrow")))
 	if out.Response.Allowed {
 		t.Fatal("the NARROWER contract must win over the target annotation, got allow (the levels were merged or the widest won)")
 	}
@@ -1168,7 +1181,7 @@ func TestAllowlistIgnoredForContractProvenanceEndToEnd(t *testing.T) {
 	}
 
 	out = newTestServer(t, st, scope.ModeEnforce, withObjects(objs), withAllowlist(wide), withContracts(contractsWith(cr))).
-		Handle(context.Background(), secretDeleteReview("l3-al", annotations(scopeAnnotation, "prod/narrow")))
+		Handle(context.Background(), secretDeleteReview("l3-al", annotations(DefaultScopeAnnotation, "prod/narrow")))
 	if out.Response.Allowed {
 		t.Fatal("a contract-provenance decision must ignore the allowlist, got allow (a server flag widened a declared scope)")
 	}
@@ -1178,5 +1191,79 @@ func TestAllowlistIgnoredForContractProvenanceEndToEnd(t *testing.T) {
 	}
 	if _, ok := out.Response.AuditAnnotations[exemptedAuditKey]; ok {
 		t.Errorf("no exemption may be recorded for a contract decision, got %v", out.Response.AuditAnnotations)
+	}
+}
+
+// --- Step 5: configurable annotation keys (Config.TargetAnnotation/ScopeAnnotation) ---
+
+// TestConfiguredAnnotationKeysGovern: the scope-governing annotation KEYS belong to the
+// server's configuration, not to package constants — an operator running KRSM beside
+// another controller (or on their own domain) sets --target-annotation/--scope-annotation
+// and BOTH channels move to those keys. The behavioural claim is a pair: the configured
+// key governs, and the default key becomes INERT, because a key that stayed live after
+// being reconfigured would let anyone who knows "krsm.io/target" re-root a scope the
+// operator believed they had moved.
+//
+// Note the direction of the inert half: an unrecognised key falls to L0, the derived
+// tree of the request's own target — strictly NARROWER than the re-root it names. A
+// mis-configured key can therefore only over-restrict, never widen.
+func TestConfiguredAnnotationKeysGovern(t *testing.T) {
+	objs := reRootObjects()
+	st := closure.NewScanState(objs)
+	const customTarget, customScope = "example.com/target", "example.com/scope"
+
+	s := newTestServer(t, st, scope.ModeAudit, withObjects(objs),
+		withContracts(contractsWith(taskContractCR(t, "prod", "task-1", `{"dim":"namespace","namespace":"prod"}`))),
+		withAnnotationKeys(customTarget, customScope))
+
+	for name, tc := range map[string]struct {
+		key, value string
+		want       scope.Provenance
+	}{
+		"configured target key re-roots":   {customTarget, "Deployment/prod/web", scope.ProvenanceAnnotation},
+		"default target key is inert":      {DefaultTargetAnnotation, "Deployment/prod/web", scope.ProvenanceDerivedOwner},
+		"configured scope key resolves L3": {customScope, "prod/task-1", scope.ProvenanceContract},
+		"default scope key is inert":       {DefaultScopeAnnotation, "prod/task-1", scope.ProvenanceDerivedOwner},
+	} {
+		out := s.Handle(context.Background(), rsDeleteReview("cfg-"+name, annotations(tc.key, tc.value)))
+		if got := out.Response.AuditAnnotations[provenanceAuditKey]; got != string(tc.want) {
+			t.Errorf("%s: provenance = %q, want %q", name, got, tc.want)
+		}
+	}
+
+	// A deny names the CONFIGURED key, not the default one: an operator who moved the
+	// channel must be able to grep the message for the key they actually configured.
+	out := s.Handle(context.Background(), rsDeleteReview("cfg-bad", annotations(customTarget, "no-slashes")))
+	if out.Response.Allowed {
+		t.Fatalf("a malformed re-root must fail closed, got allow")
+	}
+	if msg := out.Response.Result.Message; !strings.Contains(msg, customTarget) {
+		t.Errorf("deny %q must name the configured key %q", msg, customTarget)
+	}
+}
+
+// TestNewRejectsCollidingAnnotationKeys: configuring both channels on ONE key is refused
+// at startup. It is not silently harmless — resolveScope tries L3 first, so every L1
+// re-root value would be read as a contract reference and denied as malformed. That is
+// fail-closed, but it is an unserveable configuration, and a webhook that cannot serve
+// its documented behaviour must not start (the same posture as a missing mode/TLS).
+func TestNewRejectsCollidingAnnotationKeys(t *testing.T) {
+	_, err := New(Config{
+		State: reRootState(), ScopeInfo: testScope{}, Synced: func() bool { return true },
+		Mode: scope.ModeAudit, Fresh: NoFreshness,
+		TargetAnnotation: "example.com/scope", ScopeAnnotation: "example.com/scope",
+	})
+	if err == nil {
+		t.Fatal("New must reject one key configured for both scope channels")
+	}
+
+	// The collision is checked AFTER defaulting, so half-configuring onto the other
+	// channel's default is caught too.
+	if _, err := New(Config{
+		State: reRootState(), ScopeInfo: testScope{}, Synced: func() bool { return true },
+		Mode: scope.ModeAudit, Fresh: NoFreshness,
+		TargetAnnotation: DefaultScopeAnnotation,
+	}); err == nil {
+		t.Fatal("New must reject a target key that collides with the DEFAULT scope key")
 	}
 }

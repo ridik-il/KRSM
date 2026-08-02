@@ -82,7 +82,7 @@ A worklist (BFS) from the action's target, following only the relations the acti
             ┌─────────────────────── krsm (Go) ───────────────────────┐
  API server │  ValidatingWebhook handler                              │
    calls ──▶│     │                                                    │
-            │     ├─▶ scope resolver  ── reads TaskContract (informer) │
+            │     ├─▶ scope resolver  ── reads TaskContract (live GET) │
             │     ├─▶ state index     ◀─ informers/watch over R        │
             │     ├─▶ closure engine  ── C(S,A) over the indexes       │
             │     └─▶ verdict         ── C ⊆ scope(T) ? allow : deny   │
@@ -92,7 +92,7 @@ A worklist (BFS) from the action's target, following only the relations the acti
 
 - **Interception:** a `ValidatingWebhookConfiguration` — the API server calls KRSM after auth/mutation, before persistence. Pre-execution by construction. Validating (not mutating): KRSM *decides*, it does not rewrite actions.
 - **State:** in-process, informer-backed, indexed mirror of the resource types KRSM tracks. A verdict needs **zero synchronous API reads** in the common case; on-demand `GET` is a cold-start fallback only.
-- **Scope channel:** the agent stamps the request with a reference to a `TaskContract` (a CRD); KRSM resolves it from an informer. (Inline signed-token and out-of-band session map are fallbacks — see [adr/0003](adr/0003-scope-channel.md).)
+- **Scope channel:** the agent stamps the request with a reference to a `TaskContract` (a CRD); KRSM resolves it with an authoritative **live `GET`**, not an informer cache — a revoked or tightened contract must never keep authorising (v0.5 slice 6; supersedes this section's earlier informer-based resolution, see [adr/0003](adr/0003-scope-channel.md)). (Inline signed-token and out-of-band session map remain documented fallbacks.)
 - **Failure mode:** **fail-closed** when KRSM cannot compute the closure (cache cold, scope unresolvable, internal error) — an unknown blast radius must never be silently admitted. Distinguish *“closure says escape”* (deny, expected) from *“cannot compute closure”* (deny, error) in the response reason.
 - **Enforcement target:** a `namespaceSelector`/`objectSelector` limits KRSM to agent-originated requests, so it doesn't gate humans or cluster controllers.
 
@@ -101,7 +101,7 @@ A worklist (BFS) from the action's target, following only the relations the acti
 A CRD-shaped declaration that compiles to `scope(T)` as a disjunction of dimension-typed allow-clauses, one per relation dimension plus a flat identity dimension:
 
 ```yaml
-apiVersion: krsm.io/v1
+apiVersion: krsm.io/v1alpha1
 kind: TaskContract
 metadata: { name: relieve-web-1-memory, namespace: prod }
 spec:

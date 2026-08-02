@@ -15,18 +15,19 @@ import (
 	"github.com/ridik-il/krsm/scope"
 )
 
-// targetAnnotation is the Level-1 scope channel (ADR-0011): the pre-existing object
-// names the ref the ownership derivation should be RE-ROOTED at, as
-// "<Kind>[.<group>]/<namespace>/<name>". It is deliberately distinct from the agent
+// DefaultTargetAnnotation is the DEFAULT key of the Level-1 scope channel (ADR-0011):
+// the pre-existing object names the ref the ownership derivation should be RE-ROOTED at,
+// as "<Kind>[.<group>]/<namespace>/<name>". It is deliberately distinct from the agent
 // IDENTITY key (krsm.io/task, the matcher's concern) so identity and scope can never
-// collide on one key.
-const targetAnnotation = "krsm.io/target"
+// collide on one key. Config.TargetAnnotation overrides it per server.
+const DefaultTargetAnnotation = "krsm.io/target"
 
-// scopeAnnotation is the Level-3 scope channel (ADR-0003/ADR-0011): the pre-existing
-// object names a TaskContract CR as "<namespace>/<name>" whose compiled allow-clauses
-// ARE the request's scope. It outranks krsm.io/target — a declared contract is the most
-// specific statement of intent available, and the two are never merged.
-const scopeAnnotation = "krsm.io/scope"
+// DefaultScopeAnnotation is the DEFAULT key of the Level-3 scope channel
+// (ADR-0003/ADR-0011): the pre-existing object names a TaskContract CR as
+// "<namespace>/<name>" whose compiled allow-clauses ARE the request's scope. It outranks
+// the L1 key — a declared contract is the most specific statement of intent available,
+// and the two are never merged. Config.ScopeAnnotation overrides it per server.
+const DefaultScopeAnnotation = "krsm.io/scope"
 
 // ErrContractNotFound is what a contractGetter reports when the named TaskContract does
 // not exist — including when the CRD itself is absent. It is not a distinguished
@@ -63,10 +64,10 @@ type contractGetter interface {
 // reference that cannot be resolved. A referenced-but-unresolvable scope is never
 // silently downgraded to L0 — that would hide the intent the agent declared.
 func (s *Server) resolveScope(ctx context.Context, _ *admissionv1.AdmissionRequest, oldU *unstructured.Unstructured, target closure.Ref) (scope.ScopePredicate, reasonCode, error) {
-	if v, ok := governingAnnotation(oldU, scopeAnnotation); ok {
+	if v, ok := governingAnnotation(oldU, s.scopeKey); ok {
 		return s.resolveContract(ctx, v, target)
 	}
-	if v, ok := governingAnnotation(oldU, targetAnnotation); ok {
+	if v, ok := governingAnnotation(oldU, s.targetKey); ok {
 		root, rc, err := s.parseTargetRef(v)
 		if err != nil {
 			return scope.ScopePredicate{}, rc, err
@@ -92,7 +93,7 @@ func (s *Server) resolveScope(ctx context.Context, _ *admissionv1.AdmissionReque
 // reach for another namespace's more permissive contract. Identity/UID/expiry binding is
 // the deferred follow-up (issue #42), not a gap this function silently ignores.
 func (s *Server) resolveContract(ctx context.Context, v string, target closure.Ref) (scope.ScopePredicate, reasonCode, error) {
-	ns, name, rc, err := parseContractRef(v, target)
+	ns, name, rc, err := parseContractRef(s.scopeKey, v, target)
 	if err != nil {
 		return scope.ScopePredicate{}, rc, err
 	}
@@ -100,30 +101,33 @@ func (s *Server) resolveContract(ctx context.Context, v string, target closure.R
 		// L3 is not wired. The request DECLARED a contract scope, so it cannot be
 		// served — but note this branch is reached only by an L3 request: L0/L1 never
 		// touch the getter, so an unconfigured (or broken) L3 never disables them.
-		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: contract resolution is not configured on this server", scopeAnnotation, v)
+		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: contract resolution is not configured on this server", s.scopeKey, v)
 	}
 	u, err := s.contracts.Get(ctx, ns, name)
 	if err != nil {
 		// Not-found, RBAC-forbidden, deadline, transport failure — one class. They are
 		// deliberately NOT distinguished in the verdict: an agent must not be able to
 		// probe which contracts exist or which its reader may read.
-		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", scopeAnnotation, v, err)
+		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", s.scopeKey, v, err)
 	}
 	raw, err := u.MarshalJSON()
 	if err != nil {
-		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: re-encoding the contract failed: %w", scopeAnnotation, v, err)
+		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: re-encoding the contract failed: %w", s.scopeKey, v, err)
 	}
-	// JSON is a subset of YAML 1.2, so contract.Parse — the SINGLE strict parse path,
-	// shared with the offline scenario loader — reads the CR the API server returned
-	// unchanged. Strictness matters most here: the CR is attacker-influenced, and
-	// scope.Compile cannot reject a field a lax parser already discarded.
-	tc, err := contract.Parse(raw)
+	// contract.ParseCR — not Parse — because this object came from an API SERVER. Every
+	// stored object carries server-owned ObjectMeta (creationTimestamp, uid,
+	// resourceVersion, generation, managedFields) and a status subresource that the
+	// authored wire form never declares, so Parse's whole-document strictness rejects
+	// every real TaskContract: L3 would deny exactly the requests it exists to authorise,
+	// and fail-closed, so silently. ParseCR keeps the strict decode over `spec`, which is
+	// the attacker-influenced half and the only half that can widen a scope.
+	tc, err := contract.ParseCR(raw)
 	if err != nil {
-		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", scopeAnnotation, v, err)
+		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", s.scopeKey, v, err)
 	}
 	pred, err := scope.Compile(tc)
 	if err != nil {
-		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", scopeAnnotation, v, err)
+		return scope.ScopePredicate{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", s.scopeKey, v, err)
 	}
 	if rc, err := s.resolveOwnershipRoots(pred.Clauses, v); err != nil {
 		return scope.ScopePredicate{}, rc, err
@@ -152,7 +156,7 @@ func (s *Server) resolveOwnershipRoots(clauses []closure.ScopeClause, v string) 
 		obj, ok := s.info.GetByGVK(root.GVK, root.Namespace, root.Name)
 		if !ok {
 			return reasonScopeUnresolved, fmt.Errorf("%s %q: ownership root %s.%s/%s/%s names no tracked object",
-				scopeAnnotation, v, root.GVK.Kind, root.GVK.Group, root.Namespace, root.Name)
+				s.scopeKey, v, root.GVK.Kind, root.GVK.Group, root.Namespace, root.Name)
 		}
 		clauses[i].Root.UID = obj.Ref.UID
 	}
@@ -169,23 +173,23 @@ func (s *Server) resolveOwnershipRoots(clauses []closure.ScopeClause, v string) 
 // already lets this agent act in. A cluster-scoped request has no namespace to be bound
 // BY, so it cannot use L3 at all in this slice — refused rather than defaulted, because
 // defaulting would pick a namespace nobody named.
-func parseContractRef(v string, target closure.Ref) (namespace, name string, rc reasonCode, err error) {
+func parseContractRef(key, v string, target closure.Ref) (namespace, name string, rc reasonCode, err error) {
 	parts := strings.Split(v, "/")
 	if len(parts) != 2 {
-		return "", "", reasonInvalid, fmt.Errorf("%s %q: want <namespace>/<name>", scopeAnnotation, v)
+		return "", "", reasonInvalid, fmt.Errorf("%s %q: want <namespace>/<name>", key, v)
 	}
 	namespace, name = parts[0], parts[1]
 	if namespace == "" || name == "" {
-		return "", "", reasonInvalid, fmt.Errorf("%s %q: namespace and name must be non-empty", scopeAnnotation, v)
+		return "", "", reasonInvalid, fmt.Errorf("%s %q: namespace and name must be non-empty", key, v)
 	}
 	if hasSpace(namespace) || hasSpace(name) {
-		return "", "", reasonInvalid, fmt.Errorf("%s %q: segments must not contain whitespace", scopeAnnotation, v)
+		return "", "", reasonInvalid, fmt.Errorf("%s %q: segments must not contain whitespace", key, v)
 	}
 	if target.Namespace == "" {
-		return "", "", reasonScopeUnresolved, fmt.Errorf("%s %q: a cluster-scoped request cannot reference a namespaced contract", scopeAnnotation, v)
+		return "", "", reasonScopeUnresolved, fmt.Errorf("%s %q: a cluster-scoped request cannot reference a namespaced contract", key, v)
 	}
 	if namespace != target.Namespace {
-		return "", "", reasonScopeUnresolved, fmt.Errorf("%s %q: cross-namespace reference (the request acts in %q)", scopeAnnotation, v, target.Namespace)
+		return "", "", reasonScopeUnresolved, fmt.Errorf("%s %q: cross-namespace reference (the request acts in %q)", key, v, target.Namespace)
 	}
 	return namespace, name, "", nil
 }
@@ -225,34 +229,34 @@ func governingAnnotation(oldU *unstructured.Unstructured, key string) (string, b
 func (s *Server) parseTargetRef(v string) (closure.Ref, reasonCode, error) {
 	parts := strings.Split(v, "/")
 	if len(parts) != 3 {
-		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: want <Kind>[.<group>]/<namespace>/<name>", targetAnnotation, v)
+		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: want <Kind>[.<group>]/<namespace>/<name>", s.targetKey, v)
 	}
 	kindTok, ns, name := parts[0], parts[1], parts[2]
 	if kindTok == "" || name == "" {
-		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: kind and name must be non-empty", targetAnnotation, v)
+		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: kind and name must be non-empty", s.targetKey, v)
 	}
 	if hasSpace(kindTok) || hasSpace(ns) || hasSpace(name) {
-		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: segments must not contain whitespace", targetAnnotation, v)
+		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: segments must not contain whitespace", s.targetKey, v)
 	}
 
 	gvk, err := s.resolveKindToken(kindTok)
 	if err != nil {
-		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", targetAnnotation, v, err)
+		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: %w", s.targetKey, v, err)
 	}
 
 	namespaced, ok := s.info.Namespaced(gvk)
 	if !ok {
-		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: scope of kind %s/%s is unknown", targetAnnotation, v, gvk.Group, gvk.Kind)
+		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: scope of kind %s/%s is unknown", s.targetKey, v, gvk.Group, gvk.Kind)
 	}
 	if namespaced && ns == "" {
-		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: kind %s is namespaced and needs a namespace", targetAnnotation, v, gvk.Kind)
+		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: kind %s is namespaced and needs a namespace", s.targetKey, v, gvk.Kind)
 	}
 	if !namespaced && ns != "" {
-		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: kind %s is cluster-scoped and takes no namespace", targetAnnotation, v, gvk.Kind)
+		return closure.Ref{}, reasonInvalid, fmt.Errorf("%s %q: kind %s is cluster-scoped and takes no namespace", s.targetKey, v, gvk.Kind)
 	}
 	obj, ok := s.info.GetByGVK(gvk, ns, name)
 	if !ok {
-		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: names no tracked object", targetAnnotation, v)
+		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: names no tracked object", s.targetKey, v)
 	}
 	return closure.Ref{GVK: gvk, Namespace: ns, Name: name, UID: obj.Ref.UID}, "", nil
 }

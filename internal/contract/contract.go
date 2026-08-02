@@ -19,6 +19,7 @@
 package contract
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"sigs.k8s.io/yaml"
@@ -79,16 +80,66 @@ type rawMatchExpr struct {
 	Values   []string `json:"values"`
 }
 
-// Parse maps the TaskContract wire form (YAML, or the JSON a CR marshals to) to a
-// scope.TaskContract, rejecting unknown fields. It shapes the struct only; every
-// semantic judgement — apiVersion, kind, dimension support, clause consistency,
-// maxSeverity — belongs to scope.Compile, which fails closed.
+// Parse maps the AUTHORED TaskContract wire form — a taskcontract.yaml on disk, or any
+// document nobody but its author has written to — to a scope.TaskContract, rejecting
+// unknown fields ANYWHERE in the document. It shapes the struct only; every semantic
+// judgement — apiVersion, kind, dimension support, clause consistency, maxSeverity —
+// belongs to scope.Compile, which fails closed.
+//
+// Use ParseCR for an object read from a cluster: a stored object carries fields the API
+// server owns, which this decode rejects by design.
 func Parse(raw []byte) (scope.TaskContract, error) {
 	var rtc rawTaskContract
 	if err := yaml.UnmarshalStrict(raw, &rtc); err != nil {
 		return scope.TaskContract{}, fmt.Errorf("parse taskcontract: %w", err)
 	}
+	return rtc.taskContract()
+}
 
+// ParseCR maps a TaskContract CR as an API SERVER returns it — the JSON an unstructured
+// object marshals to — to a scope.TaskContract.
+//
+// It exists because Parse's whole-document strictness is unsatisfiable for a stored
+// object: every one carries server-owned ObjectMeta the wire form does not declare
+// (creationTimestamp — which ObjectMeta emits even as null — uid, resourceVersion,
+// generation, managedFields) and, when the CRD has a status subresource, a top-level
+// status. Decoding that strictly rejects EVERY real TaskContract, which would leave the
+// Level-3 channel denying every request it was built to authorise. The failure is
+// fail-closed, so it hides rather than announces itself.
+//
+// Strictness is kept exactly where it earns its keep: `spec` is decoded strictly, because
+// that is the attacker-influenced half — an agent authors the contract it then references,
+// and scope.Compile cannot reject a field a lax parser already discarded. The relaxed part
+// carries nothing that can widen a scope: only name and namespace are read from metadata,
+// and apiVersion/kind are still handed to Compile, which fails closed on either being
+// wrong. At the top level the API server's own schema pruning is the strict gate.
+func ParseCR(raw []byte) (scope.TaskContract, error) {
+	// Pass 1, NON-strict: identity and the untouched spec bytes. Unknown members of
+	// metadata (and a status subresource) are the server's, and are ignored.
+	var cr struct {
+		APIVersion string          `json:"apiVersion"`
+		Kind       string          `json:"kind"`
+		Metadata   rawMetadata     `json:"metadata"`
+		Spec       json.RawMessage `json:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &cr); err != nil {
+		return scope.TaskContract{}, fmt.Errorf("parse taskcontract CR: %w", err)
+	}
+	// Pass 2, STRICT: the spec, the half an agent authors. An absent spec decodes to the
+	// zero value and is left to Compile, which rejects a contract that authorises nothing.
+	rtc := rawTaskContract{APIVersion: cr.APIVersion, Kind: cr.Kind, Metadata: cr.Metadata}
+	if len(cr.Spec) > 0 {
+		if err := yaml.UnmarshalStrict(cr.Spec, &rtc.Spec); err != nil {
+			return scope.TaskContract{}, fmt.Errorf("parse taskcontract CR spec: %w", err)
+		}
+	}
+	return rtc.taskContract()
+}
+
+// taskContract lowers the decoded wire form to the scope package's TaskContract. It is
+// shared by both parse paths so a contract read from a file and the same contract read
+// from the cluster can never compile to different scopes.
+func (rtc rawTaskContract) taskContract() (scope.TaskContract, error) {
 	allow := make([]scope.AllowClause, 0, len(rtc.Spec.Allow))
 	for _, rc := range rtc.Spec.Allow {
 		ac := scope.AllowClause{

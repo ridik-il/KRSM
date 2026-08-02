@@ -337,3 +337,107 @@ spec:
 		t.Errorf("cluster-scoped root namespace = %q, want empty — it must not inherit the contract's namespace", got)
 	}
 }
+
+// serverPopulatedCR is a TaskContract exactly as a Kubernetes API server hands one back:
+// the author's apiVersion/kind/metadata/spec PLUS the fields the server owns and always
+// stamps — creationTimestamp (ObjectMeta marshals it even when null), uid,
+// resourceVersion, generation, managedFields — and the status subresource a CRD returns.
+// No live object is ever leaner than this, so it is the only honest fixture for the
+// cluster path.
+const serverPopulatedCR = `{
+  "apiVersion": "krsm.io/v1alpha1",
+  "kind": "TaskContract",
+  "metadata": {
+    "name": "task-1",
+    "namespace": "prod",
+    "uid": "9f1c1b8e-0f1a-4a3a-9c2b-0b6a1f2d3e4f",
+    "resourceVersion": "4711",
+    "generation": 1,
+    "creationTimestamp": "2026-08-01T10:00:00Z",
+    "managedFields": [
+      {"manager": "kubectl-client-side-apply", "operation": "Update", "apiVersion": "krsm.io/v1alpha1",
+       "time": "2026-08-01T10:00:00Z", "fieldsType": "FieldsV1",
+       "fieldsV1": {"f:spec": {"f:allow": {}}}}
+    ]
+  },
+  "spec": {"allow": [{"dim": "namespace", "namespace": "prod"}]},
+  "status": {}
+}`
+
+// TestParseCRAcceptsAServerPopulatedObject: the LIVE Level-3 path must parse the object
+// the API server actually returns. Whole-document strict decoding cannot: every stored
+// object carries server-owned ObjectMeta the wire form never declares, so a strict
+// decode rejects EVERY real TaskContract and the slice's headline capability — a
+// contract authorising an action the derived scope would block — can never fire in a
+// cluster. The failure direction is fail-closed (scope-unresolved), which is why no
+// existing test caught it: the L3 fixtures were hand-written minimal objects no API
+// server would ever produce.
+//
+// The parse must yield exactly what the same contract's FILE form yields, so the two
+// sources of one contract cannot compile to different scopes.
+func TestParseCRAcceptsAServerPopulatedObject(t *testing.T) {
+	tc, err := contract.ParseCR([]byte(serverPopulatedCR))
+	if err != nil {
+		t.Fatalf("ParseCR of a server-populated object: %v", err)
+	}
+
+	file, err := contract.Parse([]byte(`
+apiVersion: krsm.io/v1alpha1
+kind: TaskContract
+metadata: {name: task-1, namespace: prod}
+spec:
+  allow:
+    - dim: namespace
+      namespace: prod
+`))
+	if err != nil {
+		t.Fatalf("Parse of the equivalent file form: %v", err)
+	}
+	if !reflect.DeepEqual(tc, file) {
+		t.Errorf("CR and file forms of one contract must parse identically\n  CR: %#v\nfile: %#v", tc, file)
+	}
+
+	// The identity the CR path carries is load-bearing: an ownership Root written without
+	// a namespace inherits the CONTRACT's namespace (entry 21b), so losing metadata on
+	// the way through would silently re-root a subtree in "default".
+	if tc.Metadata.Name != "task-1" || tc.Metadata.Namespace != "prod" {
+		t.Errorf("metadata = %+v, want task-1/prod", tc.Metadata)
+	}
+	// apiVersion and kind must survive too — they are what Compile fails closed on.
+	if _, err := scope.Compile(tc); err != nil {
+		t.Errorf("Compile of the parsed CR: %v", err)
+	}
+}
+
+// TestParseCRKeepsSpecStrict: relaxing the decode for server-owned metadata must not
+// relax it for spec, which is the attacker-influenced half — an agent authors the
+// contract it then references. A typo'd key there must still fail loudly rather than be
+// dropped into a clause that quietly matches something else.
+func TestParseCRKeepsSpecStrict(t *testing.T) {
+	for name, raw := range map[string]string{
+		"unknown key in an allow clause": `{"apiVersion":"krsm.io/v1alpha1","kind":"TaskContract",
+			"metadata":{"name":"c","namespace":"prod","creationTimestamp":null},
+			"spec":{"allow":[{"dim":"resource","gvk":{"version":"v1","kind":"Service"},"namesapce":"prod","name":"svc"}]}}`,
+		"unknown key in spec": `{"apiVersion":"krsm.io/v1alpha1","kind":"TaskContract",
+			"metadata":{"name":"c","namespace":"prod","creationTimestamp":null},
+			"spec":{"allow":[],"maxSeverty":"high"}}`,
+		"unknown key in a clause gvk": `{"apiVersion":"krsm.io/v1alpha1","kind":"TaskContract",
+			"metadata":{"name":"c","namespace":"prod","creationTimestamp":null},
+			"spec":{"allow":[{"dim":"resource","gvk":{"version":"v1","kind":"Service","resource":"services"}}]}}`,
+	} {
+		if _, err := contract.ParseCR([]byte(raw)); err == nil {
+			t.Errorf("%s: ParseCR must reject an unknown field inside spec", name)
+		}
+	}
+}
+
+// TestParseStillRejectsUnknownTopLevelFields: the FILE path keeps whole-document
+// strictness. A taskcontract.yaml on disk has no server-populated fields, so there is
+// nothing legitimate to tolerate there and a `staus:` typo must still be an error. The
+// relaxation is scoped to the CR path, where the API server's own schema pruning is what
+// polices the top level.
+func TestParseStillRejectsUnknownTopLevelFields(t *testing.T) {
+	if _, err := contract.Parse([]byte(serverPopulatedCR)); err == nil {
+		t.Error("Parse (the file path) must still reject server-populated metadata — its strictness is unchanged")
+	}
+}
