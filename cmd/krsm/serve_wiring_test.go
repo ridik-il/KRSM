@@ -149,13 +149,14 @@ func captureServeOpts(t *testing.T, args ...string) serveOpts {
 // --allow-cluster-scoped-kind assemble the cross-boundary Allowlist. Cluster-scoped
 // exemptions key on {Group, Kind}: a BARE Kind means the core group and nothing else, so
 // listing "Node" can never exempt some CRD group's own Node — the identity confusion a
-// safety gate must not have. List items are trimmed and empty items dropped, because a
-// generated flag ("--allow-namespace $NS_LIST") routinely carries a trailing comma and an
-// operator must not have to guess whether that silently exempted the "" namespace.
+// safety gate must not have. List items are trimmed. (An EMPTY item or `*` is a usage
+// error since review round 1 — TestServeRejectsWildcardAndEmptyAllowlistEntries — rather
+// than silently dropped: an empty item is a typo or a generator bug the operator should
+// see.)
 func TestServeAllowlistFlagsBuildTheAllowlist(t *testing.T) {
 	o := captureServeOpts(t,
-		"--allow-namespace", " infra , shared ,,",
-		"--allow-cluster-scoped-kind", "Node, Foo.example.com ,, Bar.multi.example.com ,Baz.")
+		"--allow-namespace", " infra , shared ",
+		"--allow-cluster-scoped-kind", "Node, Foo.example.com , Bar.multi.example.com ,Baz.")
 
 	cfg, err := buildWebhookConfig(o, scope.ModeAudit, (*state.Provider)(nil), nil)
 	if err != nil {
@@ -164,7 +165,7 @@ func TestServeAllowlistFlagsBuildTheAllowlist(t *testing.T) {
 
 	wantNS := map[string]bool{"infra": true, "shared": true}
 	if !reflect.DeepEqual(cfg.Allowlist.Namespaces, wantNS) {
-		t.Errorf("Allowlist.Namespaces = %v, want %v (trimmed, empties dropped)", cfg.Allowlist.Namespaces, wantNS)
+		t.Errorf("Allowlist.Namespaces = %v, want %v (trimmed)", cfg.Allowlist.Namespaces, wantNS)
 	}
 	wantGK := map[closure.GVK]bool{
 		{Kind: "Node"}:                            true, // bare Kind ⇒ CORE group

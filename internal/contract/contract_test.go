@@ -441,3 +441,39 @@ func TestParseStillRejectsUnknownTopLevelFields(t *testing.T) {
 		t.Error("Parse (the file path) must still reject server-populated metadata — its strictness is unchanged")
 	}
 }
+
+// Review-1 entries 1 and 4: a resource or selector clause that omits `namespace`
+// resolves by the SAME rule as an ownership root. In a contract that has a namespace —
+// every TaskContract CR read from a cluster — it is the contract's namespace; in an
+// offline contract with none it stays the loader's "default", so the golden corpus
+// compiles exactly as before. A cluster-scoped kind resolves to "" either way.
+func TestCompiledClauseNamespaceFollowsContractNamespace(t *testing.T) {
+	const allow = `
+spec:
+  allow:
+    - {dim: resource, gvk: {version: v1, kind: ConfigMap}, name: cfg}
+    - {dim: selector, gvk: {version: v1, kind: Pod}, matchLabels: {app: web}}
+    - {dim: resource, gvk: {version: v1, kind: PersistentVolume}, name: pv-1}
+`
+	for name, tc := range map[string]struct {
+		metadata string
+		want     string
+	}{
+		"live CR in prod":      {"metadata: {name: c, namespace: prod}", "prod"},
+		"offline, no metadata": {"metadata: {name: c}", "default"},
+	} {
+		raw := []byte("apiVersion: krsm.io/v1alpha1\nkind: TaskContract\n" + tc.metadata + allow)
+		parsed, err := contract.Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		pred, err := scope.Compile(parsed)
+		if err != nil {
+			t.Fatalf("%s: Compile: %v", name, err)
+		}
+		got := []string{pred.Clauses[0].Namespace, pred.Clauses[1].Namespace, pred.Clauses[2].Namespace}
+		if want := []string{tc.want, tc.want, ""}; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: clause namespaces = %q, want %q", name, got, want)
+		}
+	}
+}

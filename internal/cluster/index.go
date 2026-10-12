@@ -13,8 +13,8 @@ package cluster
 import "github.com/ridik-il/krsm/closure"
 
 // ScopeInfo reports, per GVK, whether that kind is namespaced or cluster-scoped. It
-// is the live replacement for the offline static clusterScopedKinds map (internal/contract)
-// (internal/scenario/scenario.go:249): the live reader fills it from discovery/
+// is the live replacement for the offline static clusterScopedKinds map
+// (internal/contract/identity.go, behind NamespaceFor): the live reader fills it from discovery/
 // RESTMapper (slice 2), while slice-1 tests build it by hand. Keeping it an interface
 // lets both the discovery client and a fake satisfy the builder's only scope input.
 type ScopeInfo interface {

@@ -30,9 +30,10 @@ const (
 	// (transient sync) and escape (computed) — a correct install generates the webhook
 	// rules from the tracked set, so this state is unreachable in production (slice 7).
 	reasonUntracked reasonCode = "untracked"
-	// reasonScopeUnresolved: the request DECLARED a scope (krsm.io/target, and later
-	// krsm.io/scope) that is well-formed but cannot be resolved — an unknown or
-	// ambiguous kind token, a missing/unreadable contract. Distinct from invalid
+	// reasonScopeUnresolved: the request DECLARED a scope (the L1 krsm.io/target re-root
+	// or the L3 krsm.io/scope contract, or their configured keys) that is well-formed but
+	// cannot be resolved — an unknown or ambiguous kind token, a re-root that is not the
+	// target or an in-namespace owner of it, a missing/unreadable/uncompilable contract. Distinct from invalid
 	// (malformed syntax) so operators can grep a typo apart from a broken reference.
 	// It fails closed in BOTH modes: audit softens only a COMPUTED escape, never an
 	// unverifiable scope claim, and falling back to L0 would hide the declared intent.
@@ -77,9 +78,11 @@ type Config struct {
 	// own domain (or off a key another controller already owns) without a fork. Empty
 	// means the defaults, DefaultTargetAnnotation and DefaultScopeAnnotation.
 	//
-	// Reconfiguring a key makes the OLD key inert, which is the safe direction: an
-	// unrecognised key falls to the L0 derived tree of the request's own target, which
-	// is never wider than the re-root or contract the annotation named.
+	// Reconfiguring a key makes the OLD key INERT: an object still annotated with it
+	// falls to L0, the derived tree of the request's own target. That is not a "safe
+	// direction" — L0 may be WIDER or narrower than the re-root or contract the old key
+	// named (a narrow contract becomes the target's whole ownership tree). The serve CLI
+	// logs a warning for every re-keyed channel for that reason.
 	TargetAnnotation string
 	ScopeAnnotation  string
 	Logf             func(format string, args ...any) // nil → log.Printf
@@ -249,9 +252,10 @@ func (s *Server) Handle(ctx context.Context, review admissionv1.AdmissionReview)
 		}
 	}
 
-	// Scope channel (ADR-0011): L1 krsm.io/target re-root over L0 derived, read from
-	// oldObject only. An unresolvable declared scope denies here — never a silent
-	// downgrade to the derived tree.
+	// Scope channel (ADR-0011): strict priority L3 (krsm.io/scope contract) > L1
+	// (krsm.io/target re-root) > L0 (derived), read from oldObject only. An
+	// unresolvable declared scope denies here — never a silent downgrade to a lower
+	// level.
 	pred, rc, err := s.resolveScope(ctx, req, oldU, action.Target)
 	if err != nil {
 		return respond(review, deny(rc, err.Error()))

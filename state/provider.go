@@ -482,8 +482,10 @@ func (p *Provider) GVKsForKind(kind string) []closure.GVK {
 // groups occupy the same blind bucket, so resolving a root through it could walk a
 // different object's subtree and authorise the wrong blast radius.
 //
-// A miss reports false. The caller must fail closed on it (leave the root uid-less, so
-// the subtree walk starts from a nonexistent root) rather than synthesize an identity.
+// A miss reports false. The caller must fail closed on it — deny scope-unresolved —
+// rather than leave the root uid-less or synthesize an identity: either would let the
+// engine fall back to the group-blind Kind/ns/name bucket and walk ANOTHER group's
+// object's subtree.
 func (p *Provider) GetByGVK(gvk closure.GVK, namespace, name string) (closure.Object, bool) {
 	o, ok := p.idx.getByGVK(gvk, namespace, name)
 	if !ok {

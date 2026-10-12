@@ -126,7 +126,9 @@ func ParseCR(raw []byte) (scope.TaskContract, error) {
 		return scope.TaskContract{}, fmt.Errorf("parse taskcontract CR: %w", err)
 	}
 	// Pass 2, STRICT: the spec, the half an agent authors. An absent spec decodes to the
-	// zero value and is left to Compile, which rejects a contract that authorises nothing.
+	// zero value — an empty allow list. Compile ACCEPTS that as a deny-all scope (every
+	// collateral object escapes), which is fail-safe: the author declared an empty scope
+	// and gets exactly that, never a fall-back to the derived tree.
 	rtc := rawTaskContract{APIVersion: cr.APIVersion, Kind: cr.Kind, Metadata: cr.Metadata}
 	if len(cr.Spec) > 0 {
 		if err := yaml.UnmarshalStrict(cr.Spec, &rtc.Spec); err != nil {
@@ -145,7 +147,7 @@ func (rtc rawTaskContract) taskContract() (scope.TaskContract, error) {
 		ac := scope.AllowClause{
 			Dim:       closure.ScopeDim(rc.Dim),
 			GVK:       closure.GVK{Group: rc.GVK.Group, Version: rc.GVK.Version, Kind: rc.GVK.Kind},
-			Namespace: clauseNamespace(rc),
+			Namespace: clauseNamespace(rc, rtc.Metadata.Namespace),
 			Name:      rc.Name,
 		}
 		sel, err := rc.selector()
@@ -173,7 +175,8 @@ func (rtc rawTaskContract) taskContract() (scope.TaskContract, error) {
 	}, nil
 }
 
-// rootNamespace resolves an ownership root's namespace. A root that names no namespace
+// rootNamespace resolves an ownership root's namespace — and, through clauseNamespace,
+// the object gate of a resource or selector clause. A root that names no namespace
 // lives in the CONTRACT's own namespace when the contract has one — a TaskContract CR
 // read from the cluster always does, and "the root beside me" is what an author who
 // omitted the field meant. Only when the contract itself is namespace-less (an offline
@@ -192,12 +195,17 @@ func rootNamespace(kind, declared, contractNamespace string) string {
 	return NamespaceFor(kind, declared)
 }
 
-// clauseNamespace resolves a clause's namespace field, and applies the loader's
-// namespace defaulting ONLY to the dimensions where that field is an object gate.
+// clauseNamespace resolves a clause's namespace field, and applies namespace
+// defaulting ONLY to the dimensions where that field is an object gate.
 //
 // For a resource or selector clause the GVK+namespace pair gates candidate objects,
-// so it must default exactly as the objects themselves do (NamespaceFor) or a clause
-// omitting the namespace would gate on "" and match nothing.
+// so an omitted namespace must default or the clause would gate on "" and match
+// nothing. It defaults by the same rule rootNamespace applies to an ownership root: the
+// CONTRACT's own namespace when it has one (every TaskContract CR read from a cluster
+// does), and the loader's "default" (NamespaceFor) only for a namespace-less offline
+// contract. Defaulting a live `prod` CR's clause to "default" would grant a namespace
+// its author never named and none of the one they meant. A cluster-scoped kind still
+// resolves to "".
 //
 // For the ownership dimension the clause-level namespace must stay EMPTY — identity
 // lives on Root, and closure.ScopeClause.Validate rejects a clause-level namespace.
@@ -206,10 +214,10 @@ func rootNamespace(kind, declared, contractNamespace string) string {
 // grant: defaulting an absent one to "default" would silently authorise the whole
 // default namespace where Validate is supposed to reject the clause as malformed.
 // Both must therefore pass through literally and let Compile judge them.
-func clauseNamespace(rc rawAllowClause) string {
+func clauseNamespace(rc rawAllowClause, contractNamespace string) string {
 	switch closure.ScopeDim(rc.Dim) {
 	case "", closure.DimResource, closure.DimSelector:
-		return NamespaceFor(rc.GVK.Kind, rc.Namespace)
+		return rootNamespace(rc.GVK.Kind, rc.Namespace, contractNamespace)
 	default:
 		return rc.Namespace
 	}

@@ -354,16 +354,18 @@ func TestResolveScopeMalformedTargetFailsClosedInvalid(t *testing.T) {
 	}
 
 	// The mirror image: a cluster-scoped kind with the empty namespace segment is
-	// well-formed and RESOLVES (it just does not cover this closure). The PV is added
-	// to the tracked set so this really exercises the well-formed path — without it the
-	// ref would fail closed as unresolved and the assertion would pass vacuously.
+	// well-formed and RESOLVES. The PV is added to the tracked set so this really
+	// exercises the well-formed path — without it the ref would fail closed as
+	// unresolved. The request is the PV's own delete, re-rooted at itself, because the
+	// L1 bound (review round 1) admits only the target or an in-namespace owner of it:
+	// a cluster-scoped re-root of the namespaced ReplicaSet would now be refused for
+	// that reason, which would say nothing about the syntax under test here.
 	pv := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Version: "v1", Kind: "PersistentVolume"}, Name: "pv-1", UID: "uid-pv"}}
 	objs := append(reRootObjects(), pv)
 	out := newTestServer(t, closure.NewScanState(objs), scope.ModeEnforce, withObjects(objs)).
-		Handle(context.Background(), rsDeleteReview("pv", annotations(DefaultTargetAnnotation, "PersistentVolume//pv-1")))
-	msg := out.Response.Result.Message
-	if strings.Contains(msg, string(reasonInvalid)) || strings.Contains(msg, string(reasonScopeUnresolved)) {
-		t.Errorf("a cluster-scoped ref with an empty namespace is well-formed and resolvable, got %q", msg)
+		Handle(context.Background(), pvDeleteReview("pv", annotations(DefaultTargetAnnotation, "PersistentVolume//pv-1")))
+	if !out.Response.Allowed {
+		t.Errorf("a cluster-scoped ref with an empty namespace is well-formed and resolvable, got deny %q", out.Response.Result.Message)
 	}
 }
 
@@ -585,8 +587,11 @@ func pvDeleteReview(uid, annotations string) admissionv1.AdmissionReview {
 // filter would be a direct authorization bypass: "allowlist the shared namespace" would
 // silently become "anyone may delete anything in it".
 //
-// The target only reaches the escape set at all when the scope is re-rooted away from
-// it (L1), which is exactly the configuration an attacker would choose.
+// The target could only reach the escape set when the scope was re-rooted away from it
+// (L1), which is exactly the configuration an attacker would choose. Since review round
+// 1 the L1 bound refuses such a re-root outright (scope-unresolved, in BOTH modes)
+// before the allowlist runs, so this test pins the end-to-end outcome — the target is
+// never admitted — and exempts' isTarget guard remains defence in depth behind it.
 func TestAllowlistNeverExemptsTheActionTarget(t *testing.T) {
 	dep := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web", UID: "uid-d"}}
 	reRoot := annotations(DefaultTargetAnnotation, "Deployment.apps/prod/web")
@@ -606,8 +611,8 @@ func TestAllowlistNeverExemptsTheActionTarget(t *testing.T) {
 
 	out = newTestServer(t, st, scope.ModeAudit, withObjects(objs), withAllowlist(byNamespace)).
 		Handle(context.Background(), secretDeleteReview("tgt-2", reRoot))
-	if len(out.Response.Warnings) == 0 {
-		t.Error("audit: deleting the target itself must still warn, got no warnings")
+	if out.Response.Allowed {
+		t.Error("audit: a re-root away from the target must be refused, not softened, got allow")
 	}
 
 	// The cluster-scoped mirror: an allowlisted GroupKind does not license deleting an
@@ -685,24 +690,10 @@ func TestAllowlistNeverSoftensFailClosedBlock(t *testing.T) {
 
 // TestAllowlistAppliesToDerivedProvenanceOnly (test 21): the allowlist is an
 // approximation the operator supplies BECAUSE a derived scope cannot know which
-// boundaries are legitimate. A contract-provenance decision has no such gap — the
-// author already declared the scope — so a declared scope is never widened behind the
-// author's back by a server flag.
-//
-// The gate is asserted directly on the provenance because L3 cannot yet be driven
-// through Handle (the contractGetter seam is step 4); the end-to-end half below pins
-// that the two DERIVED provenances really are filtered, so the gate is not vacuous.
+// boundaries are legitimate, so it filters both DERIVED provenances. L0 is pinned by the
+// step-3 tests above; this pins L1. The contract half — a declared scope is never
+// widened by a server flag — is TestAllowlistIgnoredForContractProvenanceEndToEnd.
 func TestAllowlistAppliesToDerivedProvenanceOnly(t *testing.T) {
-	for prov, want := range map[scope.Provenance]bool{
-		scope.ProvenanceDerivedOwner: true,
-		scope.ProvenanceAnnotation:   true,
-		scope.ProvenanceContract:     false,
-	} {
-		if got := allowlistApplies(prov); got != want {
-			t.Errorf("allowlistApplies(%q) = %v, want %v", prov, got, want)
-		}
-	}
-
 	// L1 (annotation provenance) is filtered: a re-root that covers the target still
 	// lets the allowlist drop the indirect cross-namespace escape.
 	dep := closure.Object{Ref: closure.Ref{GVK: closure.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Namespace: "prod", Name: "web", UID: "uid-d"}}
@@ -1155,10 +1146,8 @@ func TestHandleReportsAllowlistExemptionsInAuditAnnotations(t *testing.T) {
 	}
 }
 
-// TestAllowlistIgnoredForContractProvenanceEndToEnd (test 21, end-to-end half): the
-// step-3 test could only assert the allowlistApplies gate directly, because L3 could not
-// be driven through Handle before the contractGetter seam existed. It can now, so the
-// property is pinned where it matters: a decision reached under a DECLARED contract is
+// TestAllowlistIgnoredForContractProvenanceEndToEnd (test 21, contract half): pinned
+// through Handle, where it matters — a decision reached under a DECLARED contract is
 // never widened by an operator flag.
 //
 // The allowlist exists because a DERIVED scope cannot know which shared boundaries are
@@ -1204,9 +1193,10 @@ func TestAllowlistIgnoredForContractProvenanceEndToEnd(t *testing.T) {
 // being reconfigured would let anyone who knows "krsm.io/target" re-root a scope the
 // operator believed they had moved.
 //
-// Note the direction of the inert half: an unrecognised key falls to L0, the derived
-// tree of the request's own target — strictly NARROWER than the re-root it names. A
-// mis-configured key can therefore only over-restrict, never widen.
+// Note what the inert half means: an unrecognised key falls to L0, the derived tree of
+// the request's own target, which may be WIDER or narrower than the re-root or contract
+// the old key named (a narrow contract becomes the target's whole tree). It is not a
+// "safe direction", which is why serve warns on every re-keyed channel.
 func TestConfiguredAnnotationKeysGovern(t *testing.T) {
 	objs := reRootObjects()
 	st := closure.NewScanState(objs)

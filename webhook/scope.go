@@ -72,6 +72,9 @@ func (s *Server) resolveScope(ctx context.Context, _ *admissionv1.AdmissionReque
 		if err != nil {
 			return scope.ScopePredicate{}, rc, err
 		}
+		if rc, err := s.boundReRoot(v, root, target); err != nil {
+			return scope.ScopePredicate{}, rc, err
+		}
 		pred := scope.Derive(root)
 		pred.Provenance = scope.ProvenanceAnnotation
 		return pred, "", nil
@@ -259,6 +262,68 @@ func (s *Server) parseTargetRef(v string) (closure.Ref, reasonCode, error) {
 		return closure.Ref{}, reasonScopeUnresolved, fmt.Errorf("%s %q: names no tracked object", s.targetKey, v)
 	}
 	return closure.Ref{GVK: gvk, Namespace: ns, Name: name, UID: obj.Ref.UID}, "", nil
+}
+
+// boundReRoot enforces what an L1 re-root may name: the action target itself or an
+// OWNER ANCESTOR of it, in the target's own namespace. That is the whole documented use
+// of krsm.io/target ("re-root at the owner whose tree this action belongs to"); anything
+// else would let an annotation swap the request's scope for an unrelated object's subtree.
+//
+// Ancestry is proved top-down: the target's REAL uid must be reachable from the
+// uid-pinned root by breadth-first State.OwnedChildren, over uid-pinned refs only, with
+// a visited set so an ownership cycle in state terminates. Walking UP through Owners is
+// not an option — closure.OwnerRef carries no group, so it would re-enter the
+// group-blind lookup parseTargetRef exists to avoid. A target that arrives without a
+// uid is resolved group-aware first.
+//
+// Every miss is reasonScopeUnresolved in both modes, never a fall-back to L0: the
+// request declared a scope, and that declaration cannot be honoured.
+func (s *Server) boundReRoot(v string, root, target closure.Ref) (reasonCode, error) {
+	// Same namespace first: a namespaced target re-roots only within its own namespace,
+	// and a cluster-scoped one only to a cluster-scoped R. A cluster-scoped OWNER of a
+	// namespaced target is an ancestor, but its subtree may span namespaces.
+	if root.Namespace != target.Namespace {
+		return reasonScopeUnresolved, fmt.Errorf("%s %q: re-root must be in the target's namespace %q", s.targetKey, v, target.Namespace)
+	}
+	targetUID := target.UID
+	if targetUID == "" {
+		obj, ok := s.info.GetByGVK(target.GVK, target.Namespace, target.Name)
+		if !ok {
+			return reasonScopeUnresolved, fmt.Errorf("%s %q: the action target %s names no tracked object", s.targetKey, v, target.String())
+		}
+		targetUID = obj.Ref.UID
+	}
+	if root.UID == targetUID || s.ownsTransitively(root, targetUID) {
+		return "", nil
+	}
+	return reasonScopeUnresolved, fmt.Errorf("%s %q: re-root %s is not an owner of the target %s", s.targetKey, v, gvkRef(root), target.String())
+}
+
+// ownsTransitively reports whether the object with uid want is in root's owned subtree.
+func (s *Server) ownsTransitively(root closure.Ref, want string) bool {
+	visited := map[string]bool{root.UID: true}
+	queue := []closure.Ref{root}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, child := range s.state.OwnedChildren(cur) {
+			if child.UID == "" || visited[child.UID] {
+				continue // uid-less: unprovable without the group-blind lookup
+			}
+			if child.UID == want {
+				return true
+			}
+			visited[child.UID] = true
+			queue = append(queue, child)
+		}
+	}
+	return false
+}
+
+// gvkRef renders a ref group-qualified, "<Kind>.<group>/<namespace>/<name>" — the
+// krsm.io/target token grammar — so a deny names the object it refused unambiguously.
+func gvkRef(r closure.Ref) string {
+	return r.GVK.Kind + "." + r.GVK.Group + "/" + r.Namespace + "/" + r.Name
 }
 
 // resolveKindToken maps a "<Kind>[.<group>]" token to one TRACKED GVK — the grammar the
