@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Go 1.26.9 and `golang.org/x/net` v0.60.0.**
+  - `govulncheck` reported the HTTP/2 vulnerabilities GO-2026-6603, -6610, -6611, -6612 and
+    -6617 in `golang.org/x/net` v0.56.0. They are reachable through client-go's transport
+    and the TaskContract live GET.
+  - Scanning with the toolchain the release is built with (`go-version-file: go.mod`)
+    found standard-library vulnerabilities in `net/http`, `crypto/tls`, `mime/multipart`
+    and `net/url` in Go 1.26.0, which the webhook's HTTPS server is exposed to. They are
+    fixed in 1.26.6 and 1.26.9.
+  - The `go` directive moves to 1.26.9, a patch-level bump that keeps ADR-0006's single
+    version source. `x/sys`, `x/term` and `x/text` follow as `x/net`'s requirements.
+  - `govulncheck` v1.4.0 is clean on both Go 1.26.9 and stable Go 1.27.2.
+
 ### Added
 - **Webhook slice 6: progressive scope channel (PR #41, closes #24).** `Handle`'s single
   `scope.Derive` call is replaced by a `resolveScope` seam (ADR-0011, ADR-0003) that picks
