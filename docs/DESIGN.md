@@ -111,8 +111,7 @@ spec:
       namespace: prod
       name: web-1
     - dim: ownership                # a root and everything it owns
-      root: { gvk: { group: apps, version: v1, kind: Deployment }, namespace: prod, name: web }
-      includeDescendants: true
+      root: { group: apps, version: v1, kind: Deployment, namespace: prod, name: web }
     - dim: selector                 # pods a selector covers
       gvk: { group: "", version: v1, kind: Pod }
       namespace: prod

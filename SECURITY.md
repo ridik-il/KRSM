@@ -44,7 +44,7 @@ Findings that sharpen this threat model are very welcome.
 
 ## Scope-channel residuals (v0.5)
 
-The webhook's progressive scope channel (slice 6, [adr/0003](docs/adr/0003-scope-channel.md), ADR-0011) reads two governing annotations from the request's `oldObject`: `krsm.io/scope` (Level 3, names a `TaskContract`) and `krsm.io/target` (Level 1, re-roots the derived ownership tree). Every resolution failure fails closed (`scope-unresolved`) in both modes. The following widening paths are **known and accepted for v0.5**. They are stated here so that operators can deploy around them.
+The webhook's progressive scope channel (slice 6, [adr/0003](docs/adr/0003-scope-channel.md), ADR-0011) reads two governing annotations from the request's `oldObject`: `krsm.io/scope` (Level 3, names a `TaskContract`) and `krsm.io/target` (Level 1, re-roots the derived ownership tree). Every resolution failure fails closed in both modes (`invalid` for malformed syntax, otherwise `scope-unresolved`). The following widening paths are **known and accepted for v0.5**. They are stated here so that operators can deploy around them.
 
 - **(a) Contract and target references are bearer capabilities.** KRSM honours a reference because it is present, not because of who wrote it. The bounds are:
   - a `krsm.io/scope` reference must name a contract in the request target's own namespace (a cluster-scoped request cannot use Level 3);

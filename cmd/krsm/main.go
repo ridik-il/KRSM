@@ -86,9 +86,13 @@ Commands:
                           and --tls-key; --mode audit|enforce (default audit);
                           --listen (default :8443); --agent-annotation gates
                           which requests KRSM evaluates (default krsm.io/task;
-                          "" gates everything); --agent-serviceaccount gates by
-                          request identity (required for scale/eviction/exec —
-                          those payloads cannot carry annotations).
+                          "" disables annotation matching); --agent-serviceaccount
+                          gates by request identity (required for scale/eviction/
+                          exec — those payloads cannot carry annotations);
+                          --gate-all evaluates every request. At least one gating
+                          signal is required. --request-timeout (default 10s,
+                          < 30s) bounds each request; --kubeconfig/--context pick
+                          the cluster.
                           Scope channels: --target-annotation (default
                           krsm.io/target) re-roots the ownership derivation;
                           --scope-annotation (default krsm.io/scope) names a

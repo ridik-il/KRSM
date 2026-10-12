@@ -55,7 +55,8 @@ audit-first verdict mode — implemented as a thin **scope synthesizer above
   not the derived default.
 - **Level 1 — target annotation.** When the *task* target differs from the API request
   target, the agent stamps `krsm.io/target: "<Kind>/<ns>/<name>"`; KRSM roots the
-  ownership-tree derivation there instead.
+  ownership-tree derivation there instead. *(Refined in v0.5: see the Amendment —
+  `<Kind>[.<group>]` and an owner-ancestor bound.)*
 - **Level 2 — templates.** A `TaskContract` may set `spec.template`
   (`ownership-tree` | `namespace-contained` | `single-resource` | `selector-bound`)
   plus a `target`/`selector`; the synthesizer expands the template to clauses. One-line
