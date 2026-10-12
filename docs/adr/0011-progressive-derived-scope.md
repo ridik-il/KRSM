@@ -104,3 +104,15 @@ audit-first verdict mode — implemented as a thin **scope synthesizer above
   this ADR adds three lower-friction provenances beneath the full contract. DESIGN §1's
   "not a generator / not an LLM judge / task-scope conformance" non-goals are unchanged:
   derivation is a topology computation, no model in the path.
+
+## Amendment (2026-10-12)
+
+The decision stands. v0.5 slice 6 (PR #41, issue #24) built Levels 0, 1 and 3, the allowlist and provenance reporting in the admission webhook. Level 2 templates are still v0.6. Implementation refined the text above in five places:
+
+- **The Level-1 grammar is `<Kind>[.<group>]/<namespace>/<name>`.** A bare Kind must name exactly one tracked kind; an ambiguous one fails closed. The key `krsm.io/target` is the default and can be reconfigured with `--target-annotation`. The Level-3 reference is `krsm.io/scope: "<ns>/<name>"` (`--scope-annotation`). Both are read from the request's `oldObject` only.
+- **Level 1 is bounded.** The re-root must be the action target itself, or an owner ancestor of it in the target's own namespace. Ancestry is proven by real uid. Anything else fails closed as `scope-unresolved`, so an annotation cannot swap a request's scope for an unrelated subtree or a cross-namespace one. This bound came from review round 1 ([fixes](../design/v0.5-slice6-review1-fixes.md)).
+- **A declared scope that cannot be resolved fails closed.** A malformed reference is `invalid`; a well-formed one that cannot be resolved is the new `scope-unresolved`. Both deny in both modes, and the request never falls back to a derived level.
+- **Provenance is reported in the admission response, not `closure.Decision.Reason`.** `closure` stays frozen. The provenance appears in every warning and deny message (`[scope: <provenance>]`) and in the `krsm.io/scope-provenance` audit annotation on every decided response.
+- **The allowlist is webhook startup configuration.** `--allow-namespace` and `--allow-cluster-scoped-kind` are keyed by GroupKind. The allowlist applies to derived (Level 0/1) provenance only and never exempts the action target; a contract ignores it.
+
+The residual risks of the scope channel are recorded in [SECURITY.md](../../SECURITY.md#scope-channel-residuals-v05) and in the ADR-0003 amendment.
