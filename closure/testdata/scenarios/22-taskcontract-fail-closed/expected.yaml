@@ -8,6 +8,11 @@
 # skips all verdict/closure assertions (and the |C| ≤ |R| inventory bound, which is
 # undefined here). The substring is matched against the wrapped error chain:
 # loadScope wraps with "compile taskcontract: %w" and scope.Compile/compileClause
-# returns `unsupported scope dimension "ownership"`, so "unsupported scope dimension"
+# returns `unsupported scope dimension "reference"`, so the whole quoted phrase below
 # is a stable substring of the full message.
-loadError: "unsupported scope dimension"
+#
+# The dimension is named in the substring on purpose (slice 6, design rev 3 D1): the
+# bare "unsupported scope dimension" prefix would keep passing if the contract were
+# re-pointed at some *other* unsupported dim, and would not notice that the proof had
+# drifted off `reference` — the one name closure genuinely never defines.
+loadError: 'unsupported scope dimension "reference"'

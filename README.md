@@ -18,8 +18,9 @@
 ---
 
 > **Status: early, building in the open.** The closure engine and its failure-mode corpus are
-> implemented and runnable today via `krsm check` (see the demo below); the live-cluster reads and
-> the admission webhook are next (see [ROADMAP](docs/ROADMAP.md)). The design and roadmap are stable.
+> implemented and runnable today via `krsm check` (see the demo below); live-cluster reads shipped in
+> v0.4, and the admission webhook (`krsm serve`) is in progress for v0.5, with deployment manifests
+> still pending (see [ROADMAP](docs/ROADMAP.md)). The design and roadmap are stable.
 > Stars and feedback welcome — issues especially.
 
 ## The problem in 15 seconds
@@ -87,7 +88,7 @@ load error — so it scripts cleanly.
                           informer-backed, indexed mirror of live state
 ```
 
-KRSM runs as a **validating admission webhook**: the API server calls it *after auth, before persistence*, so enforcement is pre-execution by construction. State comes from an in-process, informer-backed index, so a verdict needs no synchronous API calls and stays within a tight latency budget. The task's authorised scope is declared via a `TaskContract` resource the agent references.
+KRSM runs as a **validating admission webhook**: the API server calls it *after auth, before persistence*, so enforcement is pre-execution by construction. State comes from an in-process, informer-backed index, so a verdict needs no synchronous API calls in the common case and stays within a tight latency budget (a Level-3 contract reference adds one deadline-bounded live GET). The task's authorised scope is declared via a `TaskContract` resource the agent references.
 
 See **[docs/DESIGN.md](docs/DESIGN.md)** for the full architecture and **[docs/ROADMAP.md](docs/ROADMAP.md)** for the build plan.
 

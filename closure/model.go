@@ -12,7 +12,10 @@
 // is finite (|C| ≤ |R|) and terminating even on cyclic ownerReferences.
 package closure
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // GVK identifies a Kubernetes kind. Group is "" for the core API group (e.g. Pod).
 type GVK struct {
@@ -47,6 +50,17 @@ func (r Ref) human() string {
 
 // String implements fmt.Stringer.
 func (r Ref) String() string { return r.human() }
+
+// JoinRefs renders refs as their ", "-joined String() forms (empty for none) — the one
+// spelling shared by the CLI output and the webhook reason strings so both name refs
+// identically. Stdlib-only, so it stays inside the embeddable closure package.
+func JoinRefs(refs []Ref) string {
+	parts := make([]string, len(refs))
+	for i, r := range refs {
+		parts[i] = r.String()
+	}
+	return strings.Join(parts, ", ")
+}
 
 // OwnerRef is a resolved metadata.ownerReferences entry. UID is filled in on
 // load by resolving (Kind, Name) against the live state.

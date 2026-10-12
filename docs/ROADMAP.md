@@ -80,8 +80,8 @@ by default (ADR-0011).
   lesson, so a day-0 false positive does not get KRSM uninstalled.
 - **Progressive scope channel.** Level 1 (`krsm.io/target` annotation → ownership-tree
   from a declared target) and the full `TaskContract` (Level 3, ADR-0009) both supply
-  scope; provenance (`derived` | `annotation` | `template` | `contract`) is reported in
-  the verdict. A cross-boundary allowlist exempts legitimate shared-resource references
+  scope; provenance (`derived:ownership-tree` | `annotation` | `contract`; `template:<name>` with
+  v0.6 templates) is reported in the verdict. A cross-boundary allowlist exempts legitimate shared-resource references
   from *derived* modes.
 
 **Done when:** on `kind`, an agent-stamped escaping `delete` is **flagged in audit mode

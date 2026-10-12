@@ -97,3 +97,15 @@ re-model scope.
   `reference` dimensions; enforcing `maxSeverity` (severity `B`); and inexpressible-scope gap
   signalling (DESIGN §6). This slice introduces the package boundary, the compile/validate seam,
   and the two dimensions that exist today, on the design's committed trajectory.
+
+## Amendment (2026-10-12)
+
+The decision stands: `scope/` stays the public, stdlib-only compiler, `Compile` still takes the struct, and `closure.Safe` is still unchanged. v0.5 slice 6 (PR #41, issue #24) changed four details of the text above:
+
+- **`apiVersion` is `krsm.io/v1alpha1`, not `krsm.io/v1`.** `Compile` now accepts `v1alpha1` and rejects `v1`. Every golden contract changed in lockstep, and the verdicts are unchanged. This is a breaking change while KRSM is pre-release, and it reserves `v1` until the schema settles (v0.6 templates).
+- **`ownership` and `namespace` now compile.** The follow-on above happened: `AllowClause` gained `Root` (the ownership root), and `Compile` lowers `dim: ownership` and `dim: namespace` to the dimensions `closure` already implemented. Only `reference` is still "unsupported scope dimension", and it still fails closed. Golden 22 now uses `dim: reference` for its fail-closed case.
+- **Wire parsing moved to `internal/contract`.** `internal/scenario.parseTaskContract` became `contract.Parse`, which is strict and rejects unknown fields. It is shared by the offline loader and the webhook. `contract.ParseCR` is a variant for objects read from an API server: it tolerates server-owned metadata and status, but decodes `spec` strictly. YAML still stays out of `scope/`.
+- **Namespace defaulting follows the contract.** For a contract with `metadata.namespace`, which every live CR has, a resource, selector or ownership clause with no namespace defaults to the contract's namespace. A namespace-less offline contract keeps the loader's `default`.
+
+An empty `spec.allow` still compiles with no error to a deny-everything scope, as stated above.
+See [the slice-6 design](../design/v0.5-slice6-scope-channel.md) and its [review-round fixes](../design/v0.5-slice6-review1-fixes.md).
