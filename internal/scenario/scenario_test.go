@@ -56,8 +56,8 @@ func TestClusterScopedKindsExcludesNamespaced(t *testing.T) {
 		"StatefulSet", "DaemonSet", "PersistentVolumeClaim", "NetworkPolicy",
 		"PodDisruptionBudget", "Role", "RoleBinding", "Endpoints",
 	} {
-		if clusterScopedKinds[kind] {
-			t.Errorf("%q is namespaced but is listed as cluster-scoped — unsafe (would escape namespace containment)", kind)
+		if got := nsOf(kind, "prod"); got != "prod" {
+			t.Errorf("nsOf(%q, \"prod\") = %q, want \"prod\" — %q is namespaced but resolves as cluster-scoped, which is unsafe (it would escape namespace containment)", kind, got, kind)
 		}
 	}
 }

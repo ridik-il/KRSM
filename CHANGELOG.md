@@ -6,6 +6,66 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Go 1.26.9 and `golang.org/x/net` v0.60.0.**
+  - `govulncheck` reported the HTTP/2 vulnerabilities GO-2026-6603, -6610, -6611, -6612 and
+    -6617 in `golang.org/x/net` v0.56.0. They are reachable through client-go's transport
+    and the TaskContract live GET.
+  - Scanning with the toolchain the release is built with (`go-version-file: go.mod`)
+    found standard-library vulnerabilities in `net/http`, `crypto/tls`, `mime/multipart`
+    and `net/url` in Go 1.26.0, which the webhook's HTTPS server is exposed to. They are
+    fixed in 1.26.6 and 1.26.9.
+  - The `go` directive moves to 1.26.9, a patch-level bump that keeps ADR-0006's single
+    version source. `x/sys`, `x/term` and `x/text` follow as `x/net`'s requirements.
+  - `govulncheck` v1.4.0 is clean on both Go 1.26.9 and stable Go 1.27.2.
+
+### Added
+- **Webhook slice 6: progressive scope channel (PR #41, closes #24).** `Handle`'s single
+  `scope.Derive` call is replaced by a `resolveScope` seam (ADR-0011, ADR-0003) that picks
+  one scope per request in strict priority, never a union. The governing annotations are
+  read from the request's `oldObject` only:
+  - **L3 contract.** `krsm.io/scope: "<ns>/<name>"` names a `TaskContract` in the target's
+    own namespace. It is resolved by a **deadline-bounded live GET** of the
+    `krsm.io/v1alpha1` `taskcontracts` resource, not an informer (design rev 2: a cache
+    leaves a revocation window, i.e. a false ALLOW), then strict `contract.ParseCR` →
+    `scope.Compile`. Provenance `contract`.
+  - **L1 re-root.** `krsm.io/target: "<Kind>[.<group>]/<ns>/<name>"` re-roots the derived
+    ownership tree. Provenance `annotation`.
+  - **L0 derived.** With neither annotation, the slice-5 behaviour: provenance
+    `derived:ownership-tree`.
+  - **Provenance in `AuditAnnotations`.** `krsm.io/scope-provenance` is set on every decided
+    response, and `krsm.io/allowlist-exempted` lists the exempted refs only when the
+    allowlist softened a verdict.
+  - **Cross-boundary allowlist.** `--allow-namespace` and `--allow-cluster-scoped-kind`
+    (`<Kind>[.<group>]`, GroupKind-keyed) drop *indirect* escapes for derived (L0/L1)
+    scopes only. They never exempt the action target, and a contract ignores them.
+  - **Configurable keys.** `--target-annotation` (default `krsm.io/target`) and
+    `--scope-annotation` (default `krsm.io/scope`).
+  - **New fail-closed taxonomy code `scope-unresolved`.** It covers a well-formed but
+    unresolvable reference: a missing or unreadable contract, a cross-namespace reference,
+    an unknown or ambiguous kind token, or an uncompilable contract. It denies in both
+    modes and never falls back to L0. Malformed syntax stays `invalid`.
+  - **Contract surface.** `scope.Compile` accepts `ownership` and `namespace` clauses
+    (`AllowClause.Root`). The new `internal/contract` package is the one TaskContract
+    parser, shared with the offline loader. `state.Provider` gains `GVKsForKind` and the
+    group-aware `GetByGVK`, which pins an L1/L3 ownership root to its real uid.
+  - **Breaking (pre-release):** the TaskContract `apiVersion` is now `krsm.io/v1alpha1`;
+    `krsm.io/v1` is rejected. Golden verdicts are unchanged (golden 22 now names
+    `dim: reference`).
+  - **Round-1 review fixes:**
+    - A live contract's resource/selector clauses inherit the contract's namespace instead
+      of `default`.
+    - The L1 re-root must be the target or an owner ancestor of it in the target's
+      namespace, else `scope-unresolved`.
+    - `krsm serve` rejects empty, colliding or malformed annotation keys and empty or `*`
+      allowlist entries before any informer starts.
+    - A reconfigured annotation key logs a startup warning: objects carrying the old key
+      fall to L0.
+    - The remaining residuals are documented in `SECURITY.md`.
+  - **Deployment note:** L3 needs `get` on `taskcontracts`, which ships with slice 7
+    (#25) along with the CRD. Until then every L3 request fails closed
+    (`scope-unresolved`); L0/L1 are unaffected.
+
 ### Changed
 - **Webhook slice-5 round-2 hardening (PR #36).** Closed the round-2 review's
   under/over-gating findings and protocol nits on the admission path:

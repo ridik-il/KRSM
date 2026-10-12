@@ -29,6 +29,21 @@ type clusterInfo interface {
 	// version-insensitive). A kind the informers do not track has no closure the webhook
 	// can compute — it fails closed with a distinct taxonomy code (round-2 finding 4).
 	Tracked(gvk closure.GVK) bool
+	// GVKsForKind returns every TRACKED GVK whose Kind is kind, across all groups —
+	// the Kind→GVK direction resolveScope needs for the krsm.io/target annotation's
+	// `<Kind>[.<group>]` token. KindFor cannot answer it (it maps a plural GVR) and
+	// Tracked cannot (it is a yes/no over an already-known GVK). Returning the whole
+	// set — not a best match — is what lets the caller fail closed on an ambiguous
+	// bare Kind instead of choosing a group arbitrarily.
+	GVKsForKind(kind string) []closure.GVK
+	// GetByGVK resolves ONE tracked object by its exact Group+Kind+namespace+name.
+	// closure.State.Get cannot serve this: a uid-less ref falls back to the
+	// group-BLIND Kind/ns/name bucket, where two tracked kinds sharing a Kind in
+	// different groups collide and the later one wins. resolveScope uses this to pin
+	// an annotation-named ownership root to its REAL uid before building the clause,
+	// so the subtree walk can never key on the ambiguous bucket (design rev 3,
+	// "Group-blind human key"). A miss reports false and the caller fails closed.
+	GetByGVK(gvk closure.GVK, namespace, name string) (closure.Object, bool)
 }
 
 // subResourceGate describes how one gated sub-resource maps to an Action. The table is

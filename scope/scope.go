@@ -4,9 +4,9 @@
 // dimension-typed closure.ScopeClause values closure.Safe consumes.
 //
 // Like closure, scope is public, embeddable, and stdlib-only: it imports only the
-// closure package and the standard library. Parsing the TaskContract's YAML wire
-// form is a loader concern (internal/scenario), so an embedding agent-builder pulls
-// in no YAML dependency. Compile takes the struct, not bytes.
+// closure package and the standard library. Parsing the TaskContract's wire form is
+// a loader concern (internal/contract), so an embedding agent-builder pulls in no
+// YAML dependency. Compile takes the struct, not bytes.
 //
 // Compile fails closed: an unrecognised apiVersion/kind, an unsupported scope
 // dimension, a structurally invalid clause, or an unknown maxSeverity is a hard
@@ -20,10 +20,11 @@ import (
 )
 
 // TaskContract is the declarative, agent-referenced authorised scope (ADR-0003,
-// DESIGN §6) as a Go value. Parsing its YAML wire form is a loader concern; this
-// package compiles the struct, so the embeddable SDK pulls in no YAML dependency.
+// DESIGN §6) as a Go value. Parsing its wire form is a loader concern
+// (internal/contract); this package compiles the struct, so the embeddable SDK pulls
+// in no YAML dependency.
 type TaskContract struct {
-	APIVersion string // must be "krsm.io/v1"
+	APIVersion string // must be "krsm.io/v1alpha1"
 	Kind       string // must be "TaskContract"
 	Metadata   Metadata
 	Spec       Spec
@@ -43,14 +44,17 @@ type Spec struct {
 }
 
 // AllowClause is one declared scope dimension (the wire shape). Exactly one
-// dimension's fields are meaningful, chosen by Dim — resource and selector now;
-// ownership/namespace/reference fields are added by later slices.
+// dimension's fields are meaningful, chosen by Dim. The four dimensions closure
+// implements — resource, selector, namespace and ownership — are all reachable from
+// a contract; closure.ScopeClause.Validate is the authority on which fields each one
+// may carry, and Compile surfaces it.
 type AllowClause struct {
-	Dim       closure.ScopeDim // "resource" | "selector"
+	Dim       closure.ScopeDim // "resource" | "selector" | "namespace" | "ownership"
 	GVK       closure.GVK
 	Namespace string
 	Name      string                // Dim == resource
 	Selector  closure.LabelSelector // Dim == selector (matchLabels + matchExpressions)
+	Root      closure.Ref           // Dim == ownership: the subtree root; identity lives here
 }
 
 // Severity mirrors DESIGN §6 maxSeverity. It is carried on the compiled predicate
@@ -89,6 +93,11 @@ const (
 	// ProvenanceDerivedOwner marks a Level-0 scope synthesized by Derive from the
 	// action's target alone — the target's ownership tree — with no declared scope.
 	ProvenanceDerivedOwner Provenance = "derived:ownership-tree"
+	// ProvenanceAnnotation marks a Level-1 scope: the same synthesized ownership tree,
+	// but RE-ROOTED at a ref the request's pre-existing object named (ADR-0011's
+	// target annotation). The shape is derived; the root was declared, so the verdict
+	// must not claim it was inferred from the target alone.
+	ProvenanceAnnotation Provenance = "annotation"
 )
 
 // ScopePredicate is a compiled TaskContract: the clauses closure.Safe consumes,
@@ -157,7 +166,7 @@ func (m Mode) Apply(d closure.Decision) closure.Decision {
 // partial scope.
 func Compile(tc TaskContract) (ScopePredicate, error) {
 	const (
-		wantAPIVersion = "krsm.io/v1"
+		wantAPIVersion = "krsm.io/v1alpha1"
 		wantKind       = "TaskContract"
 	)
 	if tc.APIVersion != wantAPIVersion {
@@ -185,16 +194,22 @@ func Compile(tc TaskContract) (ScopePredicate, error) {
 // an unsupported dimension or a structurally inconsistent clause. The compiler is
 // the one place that knows the dim→clause mapping; adding a dimension later is a new
 // case here plus new AllowClause fields. An empty Dim is read as resource for parity
-// with closure's back-compat default; any other value (a typo, or a not-yet-built
-// ownership/namespace/reference) is a hard error so the author learns immediately
-// rather than getting a silently narrowed scope.
+// with closure's back-compat default.
+//
+// The accepted set is exactly the four dimensions closure defines (resource,
+// selector, namespace, ownership) — the contract surface no longer lags the engine.
+// Anything else (a typo, or a name DESIGN §6 once floated as future syntax such as
+// `reference`, which is not a dimension at all) is a hard error so the author learns
+// immediately rather than getting a silently narrowed scope.
 //
 // The clause is built preserving every field the author declared, then run through
 // closure.ScopeClause.Validate — so an inconsistent contract (e.g. a selector clause
-// also carrying a name) is surfaced rather than silently dropped by a constructor.
+// also carrying a name, or an ownership clause carrying a clause-level GVK beside its
+// Root) is surfaced rather than silently dropped by a constructor. Validate owns the
+// per-dimension structural rules; the compiler adds no second copy of them.
 func compileClause(ac AllowClause) (closure.ScopeClause, error) {
 	switch ac.Dim {
-	case "", closure.DimResource, closure.DimSelector:
+	case "", closure.DimResource, closure.DimSelector, closure.DimNamespace, closure.DimOwnership:
 	default:
 		return closure.ScopeClause{}, fmt.Errorf("unsupported scope dimension %q", ac.Dim)
 	}
@@ -204,6 +219,7 @@ func compileClause(ac AllowClause) (closure.ScopeClause, error) {
 		Namespace: ac.Namespace,
 		Name:      ac.Name,
 		Selector:  ac.Selector,
+		Root:      ac.Root,
 	}
 	if err := clause.Validate(); err != nil {
 		return closure.ScopeClause{}, fmt.Errorf("invalid allow clause: %w", err)

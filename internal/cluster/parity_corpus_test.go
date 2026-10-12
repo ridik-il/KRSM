@@ -32,7 +32,7 @@ import (
 // If the unstructured extractor diverges from the YAML loader on ANY relation, the
 // resulting closure differs and the parity assertion fails — before a cluster is touched.
 
-// corpusClusterScopedKinds mirrors internal/scenario.clusterScopedKinds: the static
+// corpusClusterScopedKinds mirrors internal/contract.clusterScopedKinds: the static
 // scope table the loader uses to namespace objects. The converter resolves namespaces
 // through a ScopeInfo built from this set so the builder's Ref.Namespace (and therefore
 // the injected uids) match the loader's nsOf exactly.

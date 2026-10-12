@@ -21,6 +21,9 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -83,10 +86,22 @@ Commands:
                           and --tls-key; --mode audit|enforce (default audit);
                           --listen (default :8443); --agent-annotation gates
                           which requests KRSM evaluates (default krsm.io/task;
-                          "" gates everything); --agent-serviceaccount gates by
-                          request identity (required for scale/eviction/exec —
-                          those payloads cannot carry annotations). Fails closed
-                          on unsynced cache, staleness, timeout, or any error.
+                          "" disables annotation matching); --agent-serviceaccount
+                          gates by request identity (required for scale/eviction/
+                          exec — those payloads cannot carry annotations);
+                          --gate-all evaluates every request. At least one gating
+                          signal is required. --request-timeout (default 10s,
+                          < 30s) bounds each request; --kubeconfig/--context pick
+                          the cluster.
+                          Scope channels: --target-annotation (default
+                          krsm.io/target) re-roots the ownership derivation;
+                          --scope-annotation (default krsm.io/scope) names a
+                          TaskContract whose clauses are the scope.
+                          --allow-namespace and --allow-cluster-scoped-kind
+                          ("<Kind>[.<group>]") exempt shared boundaries an
+                          agent's INDIRECT collateral may reach — never the
+                          action target. Fails closed on unsynced cache,
+                          staleness, timeout, or any error.
   version                 Print the krsm version
   help                    Show this help
 
@@ -617,6 +632,25 @@ type serveOpts struct {
 	contextName          string
 	requestTimeout       time.Duration
 	resync               time.Duration
+	// allowNamespaces / allowClusterScopedKinds are the cross-boundary allowlist: the
+	// shared boundaries a DERIVED (L0/L1) scope's INDIRECT collateral may reach without
+	// escaping. They never exempt the action target itself (webhook.Allowlist).
+	allowNamespaces         string
+	allowClusterScopedKinds string
+	// targetAnnotation / scopeAnnotation are the keys of the two scope channels, so an
+	// operator can move them off krsm.io/ (or off a key another controller owns).
+	targetAnnotation string
+	scopeAnnotation  string
+}
+
+// contractGetter is the Level-3 seam as PACKAGE MAIN needs it: resolve a TaskContract CR
+// by a live read. It is declared here, at the consumer, rather than imported — webhook's
+// own seam type is unexported, so the design's literal `contracts contractGetter`
+// parameter cannot name it from this package. An interface value declared here assigns
+// cleanly to webhook.Config.Contracts (Go matches interface method sets structurally),
+// which keeps buildWebhookConfig pure and testable with a stub.
+type contractGetter interface {
+	Get(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error)
 }
 
 // runServe validates the serve flags FAIL-FAST (a webhook without TLS material or a
@@ -638,6 +672,10 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&o.contextName, "context", "", "kubeconfig context")
 	fs.DurationVar(&o.requestTimeout, "request-timeout", webhook.DefaultRequestTimeout, "per-request deadline (must be > 0 and < 30s, the webhook config's timeoutSeconds ceiling)")
 	fs.DurationVar(&o.resync, "resync", 0, "informer resync period (0 = watch deltas only)")
+	fs.StringVar(&o.allowNamespaces, "allow-namespace", "", "comma-separated namespaces whose resources a DERIVED scope's INDIRECT collateral may reach without escaping (never exempts the action target)")
+	fs.StringVar(&o.allowClusterScopedKinds, "allow-cluster-scoped-kind", "", `comma-separated cluster-scoped kinds exempt as indirect collateral, as "<Kind>[.<group>]" (e.g. "Node" = the core group's Node, "Foo.example.com")`)
+	fs.StringVar(&o.targetAnnotation, "target-annotation", webhook.DefaultTargetAnnotation, "annotation key naming the ref the ownership derivation is re-rooted at (Level 1)")
+	fs.StringVar(&o.scopeAnnotation, "scope-annotation", webhook.DefaultScopeAnnotation, "annotation key naming the TaskContract whose clauses are the request's scope (Level 3)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -658,7 +696,73 @@ func runServe(args []string, stdout, stderr io.Writer) error {
 	if _, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll); err != nil {
 		return err
 	}
+	// Same fail-fast posture for the allowlist: a malformed kind token must be reported
+	// before the informers start, not after a cache sync the operator waited for.
+	if _, err := parseAllowlist(o.allowNamespaces, o.allowClusterScopedKinds); err != nil {
+		return err
+	}
+	// And for the scope-channel keys: webhook.New would only catch a collision after the
+	// informers synced, and an empty key would silently mean the default.
+	if err := validateAnnotationKeys(o); err != nil {
+		return err
+	}
+	warnReKeyedChannels(o, stderr)
 	return serveWebhook(o, mode, stdout, stderr)
+}
+
+// warnReKeyedChannels logs one startup warning per scope channel moved off its default
+// key. Re-keying makes the OLD key inert: an object still carrying it is no longer read
+// and falls to L0, the derived tree of the request's own target — which can be WIDER
+// than the re-root or contract the old key named, not only narrower. That is not a
+// silent change an operator should discover from a verdict.
+func warnReKeyedChannels(o serveOpts, stderr io.Writer) {
+	for _, c := range []struct{ flag, def, key string }{
+		{"--target-annotation", webhook.DefaultTargetAnnotation, o.targetAnnotation},
+		{"--scope-annotation", webhook.DefaultScopeAnnotation, o.scopeAnnotation},
+	} {
+		if c.key == c.def {
+			continue
+		}
+		fmt.Fprintf(stderr, "krsm serve: warning: %s moved the channel from %q to %q; objects still annotated %q are no longer read and fall to L0 (their own derived tree), which may be wider or narrower than the scope that key named\n",
+			c.flag, c.def, c.key, c.def)
+	}
+}
+
+// validateAnnotationKeys refuses scope-channel keys the webhook cannot serve as the
+// operator intended: empty, malformed, or shared between two of the target, scope and
+// agent-identity channels (one key serving two channels makes every value parse as
+// both). An EMPTY key is refused rather than defaulted: an operator who
+// cleared --scope-annotation believing they had disabled L3 would otherwise have left it
+// live on krsm.io/scope.
+func validateAnnotationKeys(o serveOpts) error {
+	channels := []struct{ flag, key string }{
+		{"--target-annotation", o.targetAnnotation},
+		{"--scope-annotation", o.scopeAnnotation},
+	}
+	for _, k := range channels {
+		if k.key == "" {
+			return fmt.Errorf("serve: %s must not be empty (the scope channels cannot be disabled; leave it unset for the default)", k.flag)
+		}
+		// A key that is not a valid annotation key can never appear on an object, so the
+		// channel it names would be silently dead.
+		if errs := validation.IsQualifiedName(k.key); len(errs) > 0 {
+			return fmt.Errorf("serve: invalid %s %q: %s", k.flag, k.key, strings.Join(errs, "; "))
+		}
+	}
+	// The three channels need three distinct keys. The agent key takes part only when
+	// set: "" turns annotation matching off and is not a key at all.
+	keys := channels
+	if o.agentAnnotation != "" {
+		keys = append(keys, struct{ flag, key string }{"--agent-annotation", o.agentAnnotation})
+	}
+	for i := range keys {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i].key == keys[j].key {
+				return fmt.Errorf("serve: %s %q collides with %s; each channel needs its own key", keys[j].flag, keys[j].key, keys[i].flag)
+			}
+		}
+	}
+	return nil
 }
 
 // agentMatcher assembles the AgentMatcher from the serve flags. --gate-all is the
@@ -687,24 +791,102 @@ func agentMatcher(annotationKey, serviceAccounts string, gateAll bool) (webhook.
 	}
 }
 
-// buildWebhookConfig assembles the production webhook.Config from the flags and the
-// Provider. Pure and hermetically tested: only a test over this assembly catches a
-// dropped field before it silently disables a safety collaborator in production (PR #36
-// review finding 9). It returns the same matcher usage error as the runServe fail-fast.
-func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider) (webhook.Config, error) {
+// parseAllowlist assembles the cross-boundary webhook.Allowlist from the two
+// comma-separated serve flags. List items are trimmed; an EMPTY item (`a,,b`, a trailing
+// comma) or a `*` is a usage error. The list is matched literally, so `*` would exempt
+// nothing while the operator believed it exempted everything, and an empty item is a
+// typo or a generator bug — dropping it silently hides that from the operator.
+//
+// A cluster-scoped entry is "<Kind>[.<group>]" and keys on {Group, Kind}: a BARE Kind
+// means the CORE group and nothing else (a trailing dot says so explicitly), so listing
+// "Node" can never exempt some CRD group's own Node. That asymmetry is deliberate — the
+// grammar's permissive reading ("any group's Node") is exactly the cross-group identity
+// confusion the GroupKind key exists to prevent, so the narrow reading is the only one
+// offered. An entry with no Kind (".example.com") could never match a live ref, so it is
+// a usage error rather than a dead exemption the operator believes in.
+func parseAllowlist(namespaces, clusterScopedKinds string) (webhook.Allowlist, error) {
+	var a webhook.Allowlist
+	nss, err := splitList("--allow-namespace", namespaces)
+	if err != nil {
+		return webhook.Allowlist{}, err
+	}
+	kinds, err := splitList("--allow-cluster-scoped-kind", clusterScopedKinds)
+	if err != nil {
+		return webhook.Allowlist{}, err
+	}
+	for _, ns := range nss {
+		if a.Namespaces == nil {
+			a.Namespaces = map[string]bool{}
+		}
+		a.Namespaces[ns] = true
+	}
+	for _, tok := range kinds {
+		kind, group, _ := strings.Cut(tok, ".") // no dot ⇒ core group, same as a trailing dot
+		if kind == "" {
+			return webhook.Allowlist{}, fmt.Errorf("serve: invalid --allow-cluster-scoped-kind %q (want \"<Kind>[.<group>]\", e.g. Node or Foo.example.com)", tok)
+		}
+		if a.ClusterScopedGroupKinds == nil {
+			a.ClusterScopedGroupKinds = map[closure.GVK]bool{}
+		}
+		// Version is deliberately zero: an exemption is about a kind, not about which
+		// version of it a request happens to name.
+		a.ClusterScopedGroupKinds[closure.GVK{Group: group, Kind: kind}] = true
+	}
+	return a, nil
+}
+
+// splitList splits a comma-separated allowlist flag value into trimmed items, refusing
+// an empty item or a `*`. An unset (empty) flag is no list at all.
+func splitList(flagName, v string) ([]string, error) {
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		item = strings.TrimSpace(item)
+		switch item {
+		case "":
+			return nil, fmt.Errorf("serve: invalid %s %q: empty entry (check for a doubled or trailing comma)", flagName, v)
+		case "*":
+			return nil, fmt.Errorf("serve: invalid %s %q: `*` is not a wildcard — entries are matched literally, so list each one", flagName, v)
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// buildWebhookConfig assembles the production webhook.Config from the flags, the
+// Provider and the injected contract getter. Pure and hermetically tested: only a test
+// over this assembly catches a dropped field before it silently disables a safety
+// collaborator in production (PR #36 review finding 9). It returns the same matcher and
+// allowlist usage errors as the runServe fail-fast.
+//
+// contracts is a PARAMETER, not something built here, because the Level-3 getter needs a
+// live dynamic client and this function must stay pure — serveWebhook, which already
+// holds the *rest.Config, constructs it and passes it in.
+func buildWebhookConfig(o serveOpts, mode scope.Mode, provider *state.Provider, contracts contractGetter) (webhook.Config, error) {
 	matcher, err := agentMatcher(o.agentAnnotation, o.agentServiceAccounts, o.gateAll)
 	if err != nil {
 		return webhook.Config{}, err
 	}
-	return webhook.Config{
-		State:     provider,
-		ScopeInfo: provider,
-		Synced:    provider.HasSynced,
-		Fresh:     provider,
-		Mode:      mode,
-		Matcher:   matcher,
-		Timeout:   o.requestTimeout,
-	}, nil
+	allowlist, err := parseAllowlist(o.allowNamespaces, o.allowClusterScopedKinds)
+	if err != nil {
+		return webhook.Config{}, err
+	}
+	cfg := webhook.Config{
+		State:            provider,
+		ScopeInfo:        provider,
+		Synced:           provider.HasSynced,
+		Fresh:            provider,
+		Mode:             mode,
+		Matcher:          matcher,
+		Timeout:          o.requestTimeout,
+		Allowlist:        allowlist,
+		TargetAnnotation: o.targetAnnotation,
+		ScopeAnnotation:  o.scopeAnnotation,
+		Contracts:        contracts,
+	}
+	return cfg, nil
 }
 
 // serveWebhook is the impure tail of runServe: cluster clients, informer start+sync,
@@ -733,7 +915,15 @@ var serveWebhook = func(o serveOpts, mode scope.Mode, stdout, _ io.Writer) error
 		return errors.New("serve: informer caches did not sync (fail-closed: not serving)")
 	}
 
-	whCfg, err := buildWebhookConfig(o, mode, provider)
+	// Level 3's contract getter: a LIVE GET through its own dynamic client, never an
+	// informer. It performs no discovery, so the webhook starts and serves L0/L1
+	// normally with no TaskContract CRD installed — the absence surfaces as a
+	// fail-closed deny on the L3 path only, and a CRD installed later needs no restart.
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	whCfg, err := buildWebhookConfig(o, mode, provider, webhook.NewDynamicContractGetter(dyn))
 	if err != nil {
 		return err
 	}

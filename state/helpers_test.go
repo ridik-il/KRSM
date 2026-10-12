@@ -45,7 +45,7 @@ var corpusGVR = map[string]schema.GroupVersionResource{
 	"MyCR":                    {Group: "example.com", Version: "v1", Resource: "mycrs"},
 }
 
-// corpusClusterScoped mirrors internal/scenario.clusterScopedKinds so the test resolves
+// corpusClusterScoped mirrors internal/contract.clusterScopedKinds so the test resolves
 // namespaces (and therefore injected uids) exactly as the loader does.
 var corpusClusterScoped = map[string]bool{
 	"Namespace": true, "PersistentVolume": true, "Node": true, "ClusterRole": true,

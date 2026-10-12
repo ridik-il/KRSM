@@ -420,7 +420,7 @@ func closureRelevantFailures(gdf *discovery.ErrGroupDiscoveryFailed) []schema.Gr
 
 // discoveryScope is a ScopeInfo backed by a discovery-built GVK→namespaced map. A GVK
 // not present is unknown (ok=false): the live replacement for the loader's static
-// clusterScopedKinds map (internal/scenario/scenario.go:249).
+// clusterScopedKinds map (internal/contract/identity.go).
 type discoveryScope map[closure.GVK]bool
 
 func (d discoveryScope) Namespaced(gvk closure.GVK) (bool, bool) {

@@ -12,8 +12,10 @@ import (
 
 // testScope is the minimal clusterInfo for webhook tests: the corpus kinds the
 // admission tests use, namespaced unless listed cluster-scoped (mirrors the loader),
-// with an exact GVR→GVK table for the sub-resource parents.
-type testScope struct{}
+// with an exact GVR→GVK table for the sub-resource parents. objs is the tracked object
+// set GetByGVK answers from — the fake's stand-in for the Provider's group-aware index;
+// tests that never resolve an ownership root leave it nil.
+type testScope struct{ objs []closure.Object }
 
 var testClusterScoped = map[string]bool{"Namespace": true, "PersistentVolume": true}
 
@@ -31,20 +33,53 @@ func (testScope) KindFor(group, resource string) (closure.GVK, bool) {
 	return gvk, ok
 }
 
-// testTrackedKinds is the group+Kind set the webhook tests treat as informer-watched
-// (the corpus kinds the admission tests address). Version is ignored, mirroring the
-// real Provider.Tracked.
-var testTrackedKinds = map[[2]string]bool{
-	{"apps", "Deployment"}: true,
-	{"apps", "ReplicaSet"}: true,
-	{"", "Pod"}:            true,
-	{"", "Service"}:        true,
-	{"", "ConfigMap"}:      true,
-	{"", "Secret"}:         true,
+// testTrackedGVKs is the single source of truth for what the webhook tests treat as
+// informer-watched (the corpus kinds the admission tests address), mirroring the real
+// Provider's targets map: Tracked matches it group+Kind (version-insensitive) and
+// GVKsForKind indexes it by Kind. The two Widget entries exist so an unqualified Kind
+// token can be genuinely ambiguous across groups.
+var testTrackedGVKs = []closure.GVK{
+	{Group: "apps", Version: "v1", Kind: "Deployment"},
+	{Group: "apps", Version: "v1", Kind: "ReplicaSet"},
+	{Version: "v1", Kind: "Pod"},
+	{Version: "v1", Kind: "Service"},
+	{Version: "v1", Kind: "ConfigMap"},
+	{Version: "v1", Kind: "Secret"},
+	{Version: "v1", Kind: "PersistentVolume"}, // the one tracked CLUSTER-SCOPED kind
+	{Group: "a.example.com", Version: "v1", Kind: "Widget"},
+	{Group: "b.example.com", Version: "v1", Kind: "Widget"},
 }
 
 func (testScope) Tracked(gvk closure.GVK) bool {
-	return testTrackedKinds[[2]string{gvk.Group, gvk.Kind}]
+	for _, k := range testTrackedGVKs {
+		if k.Group == gvk.Group && k.Kind == gvk.Kind {
+			return true
+		}
+	}
+	return false
+}
+
+// GetByGVK is the group-AWARE exact lookup: Group + Kind + namespace + name, never the
+// group-blind Kind/ns/name fallback, mirroring state.Provider.GetByGVK. Version is not
+// part of the key (a GroupKind+ns+name names one object).
+func (s testScope) GetByGVK(gvk closure.GVK, namespace, name string) (closure.Object, bool) {
+	for _, o := range s.objs {
+		if o.Ref.GVK.Group == gvk.Group && o.Ref.GVK.Kind == gvk.Kind &&
+			o.Ref.Namespace == namespace && o.Ref.Name == name {
+			return o, true
+		}
+	}
+	return closure.Object{}, false
+}
+
+func (testScope) GVKsForKind(kind string) []closure.GVK {
+	var out []closure.GVK
+	for _, k := range testTrackedGVKs {
+		if k.Kind == kind {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func raw(json string) runtime.RawExtension { return runtime.RawExtension{Raw: []byte(json)} }
